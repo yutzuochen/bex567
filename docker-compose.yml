@@ -1,0 +1,82 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: business_exchange
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 15s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 15s
+      retries: 10
+
+  backend:
+    build:
+      context: ./business_exchange_marketplace
+      dockerfile: Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      APP_PORT: 8080
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: app
+      DB_PASSWORD: app_password
+      DB_NAME: business_exchange
+      REDIS_ADDR: redis:6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ""
+      JWT_SECRET: changeme-super-secret
+      JWT_ISSUER: trade_company
+      JWT_EXPIRE_MINUTES: 60
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./business_exchange_marketplace_frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+    volumes:
+      # For development: mount source code for hot reload
+      - ./business_exchange_marketplace_frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+  adminer:
+    image: adminer:4
+    ports:
+      - "8081:8080"
+    depends_on:
+      - mysql
+
+volumes:
+  db_data:
