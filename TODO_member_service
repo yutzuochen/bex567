@@ -1,0 +1,92 @@
+I want to build a members-service and let this service be inside the backend application. I have something cares as following.
+
+
+Signup
+
+1.Email → Send verification (SendGrid); on confirm, create default user role + empty profile.
+
+Login
+
+1.Password check → create server session (do not use JWT for browser side) → set cookie sid (HttpOnly, Secure, SameSite=Lax).
+
+2.Admin/seller with 2FA → second step before issuing full session.
+
+3.Expose “Active sessions” page with revoke.
+
+Password reset
+
+1.One-time token (short TTL, 30min), single use; throttle requests per email/IP.
+
+
+Identity & auth:
+
+1.Email signup/login (bcrypt/argon2 hash), email verification, password reset.
+
+2.Session auth (HttpOnly, Secure cookie) with session revoke/logout; rate-limit login.
+
+3.Basic roles: user (buyer), seller, admin.
+
+Profile & settings:
+
+1.Profile
+
+2.Seller fields: company name、統一編號（optional; treat as sensitive）、聯絡電話。
+
+3.Privacy & notification preferences (email toggles).
+
+Lead/Messaging basics
+
+1.“Contact seller” form → delivers lead to seller (email + inbox), anti-spam (rate-limit + honeypot/Turnstile).
+
+Admin essentials
+
+1.User list/search, view profile & status, ban/suspend/activate, role change.
+
+2.View leads, moderate abuse reports.
+
+mailhog (dev) / SMTP provider (prod): send verification/reset emails. Use Sendgrid in production environment.
+
+Use redis to store sessions and rate-limits.
+
+# Security checklist
+
+Hash passwords (bcrypt/argon2id), never plain. bcrypt + server sessions
+
+HttpOnly + Secure cookies, SameSite=Lax
+
+Rate limit login/forgot endpoints(e.g., Redis token bucket)
+
+Email verification before full access
+
+Password reset tokens: one-time, short TTL (30 min)
+
+Audit logs for login, password change, role change
+
+Anti-bot: Honeypot: add a hidden field (CSS-hidden). If it’s filled → bot.
+
+Anti-bot: reject submissions made < 800ms after the form rendered
+
+Strict server-side validation (don’t trust the client):Whitelist per field + length limits
+
+Limit body size.No SVG (or sanitize thoroughly).
+
+- Per image file: 5 MB (good balance for 1600–2048px long side).
+    
+    If you re-encode to WebP server-side, even 3 MB works.
+    
+- Per request total: 25 MB (e.g., up to 5 images × 5 MB).
+- Max files per request: 10 (or match your product UI).
+- Profile avatar: 1 MB cap; resize to 512×512.
+- Global body cap (DoS guard): 30 MB.
+
+To avoid XSS  ,Escape data in JSON / attributes; don’t echo raw user input into `<script>`
+
+What it means: Don’t trust the browser’s `Content-Type` or filename. Read the first ≤512 bytes of the uploaded file and let Go decide what it actually is. Only allow types you expect (e.g., `image/jpeg`, `image/png`, `image/webp`
+
+<In frontend>
+
+Set cookie domain to your apex (e.g., `.example.com`) if frontend and backend are on subdomains.
+
+Next.js: always `credentials: 'include'` when calling the API; read the `csrf` cookie and send `x-csrf-token`
+
+check Origin/Referer + double-submit token or state-changing POSTs if your site has forms

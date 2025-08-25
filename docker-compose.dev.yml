@@ -68,6 +68,7 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8080
     depends_on:
       - backend
+    user: "1001:1001"  # Use the nextjs user created in Dockerfile
     volumes:
       # For development: mount source code for hot reload
       - ./business_exchange_marketplace_frontend:/app
