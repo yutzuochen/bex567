@@ -1,0 +1,12 @@
+# 不要把大型或動態產物送進 build context
+.git
+.next
+node_modules
+**/.DS_Store
+*.log
+.env
+.env.*
+coverage
+.cache
+Dockerfile*
+docker-compose*.yml

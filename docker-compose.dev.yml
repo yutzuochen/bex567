@@ -31,6 +31,7 @@ services:
     build:
       context: ./business_exchange_marketplace
       dockerfile: Dockerfile.dev
+      # target: dev 
     depends_on:
       mysql:
         condition: service_healthy
@@ -61,20 +62,33 @@ services:
     build:
       context: ./business_exchange_marketplace_frontend
       dockerfile: Dockerfile.dev
+      # target: dev
+    command: ["npm", "run", "dev"]
     ports:
       - "3000:3000"
     environment:
-      NODE_ENV: development
-      NEXT_PUBLIC_API_URL: http://localhost:8080
-    depends_on:
-      - backend
-    user: "1001:1001"  # Use the nextjs user created in Dockerfile
+      - NODE_ENV=development
+      - NEXT_TELEMETRY_DISABLED=1
+      # 下兩行能讓 Hot Reload 在各種環境更穩（WSL/VM/網路檔案系統請務必保留）
+      - CHOKIDAR_USEPOLLING=1
+      - WATCHPACK_POLLING=true
+      # 依你的後端而定
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
     volumes:
-      # For development: mount source code for hot reload
+      # 程式碼雙向同步（Hot Reload）
       - ./business_exchange_marketplace_frontend:/app
-      - /app/node_modules
-      - /app/.next
-    command: npm run dev
+      # 依賴放在命名 volume，避免每次 build 重裝（首次啟動會自動 npm ci）
+      - frontend_node_modules:/app/node_modules
+      # Next.js 編譯快取，重啟更快
+      - frontend_next_cache:/app/.next/cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    # 如需自動重啟再打開
+    # restart: unless-stopped
 
   adminer:
     image: adminer:4
@@ -85,3 +99,5 @@ services:
 
 volumes:
   db_data:
+  frontend_node_modules:
+  frontend_next_cache:
