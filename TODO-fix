@@ -1,0 +1,4 @@
+I ran "make file" in current folder, and get an error from "127.0.0.1:3000".
+The error i got in console of browser as follows.
+page.tsx:74 💥 Unexpected error: TypeError: _lib_api__WEBPACK_IMPORTED_MODULE_2__.apiClient.getCategories is not a function
+ at fetchData 
