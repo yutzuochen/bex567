@@ -1,0 +1,22 @@
+# Development Dockerfile with hot reload
+FROM golang:1.23-alpine
+
+WORKDIR /app
+
+# 安裝必要工具
+RUN apk add --no-cache git ca-certificates tzdata curl
+
+# 複製 go mod 檔案
+COPY go.mod go.sum ./
+
+# 下載依賴
+RUN go mod download
+
+# 複製原始碼
+COPY . .
+
+# 暴露端口
+EXPOSE 8081
+
+# 使用簡單的開發模式（直接運行，支持卷掛載熱重載）
+CMD ["go", "run", "./cmd/server"]

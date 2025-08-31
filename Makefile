@@ -1,16 +1,17 @@
-.PHONY: help up down dev dev-down logs logs-backend logs-frontend clean rebuild
+.PHONY: help up down dev dev-down logs logs-backend logs-frontend logs-auction clean rebuild
 
 # Default target
 help:
 	@echo "🚀 Business Exchange Marketplace - Docker Commands"
 	@echo ""
 	@echo "Commands:"
-	@echo "  up          - Start production stack (backend + frontend + db)"
+	@echo "  up          - Start production stack (backend + auction + frontend + db)"
 	@echo "  down        - Stop all services"
 	@echo "  dev         - Start development stack with hot reload"
 	@echo "  dev-down    - Stop development stack"
 	@echo "  logs        - View all service logs"
 	@echo "  logs-backend- View backend logs only"
+	@echo "  logs-auction- View auction service logs only"
 	@echo "  logs-frontend- View frontend logs only"
 	@echo "  clean       - Remove all containers and volumes"
 	@echo "  rebuild     - Rebuild all services"
@@ -42,6 +43,10 @@ logs:
 logs-backend:
 	@echo "📋 Viewing backend logs..."
 	docker compose -f docker-compose.dev.yml logs -f backend
+
+logs-auction:
+	@echo "📋 Viewing auction service logs..."
+	docker compose -f docker-compose.dev.yml logs -f auction
 
 logs-frontend:
 	@echo "📋 Viewing frontend logs..."

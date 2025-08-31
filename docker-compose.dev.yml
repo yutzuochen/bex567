@@ -6,10 +6,12 @@ services:
       MYSQL_DATABASE: business_exchange
       MYSQL_USER: app
       MYSQL_PASSWORD: app_password
+      TZ: Asia/Hong_Kong
     ports:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
+      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
@@ -51,6 +53,7 @@ services:
       JWT_SECRET: changeme-super-secret
       JWT_ISSUER: trade_company
       JWT_EXPIRE_MINUTES: 60
+      TZ: Asia/Hong_Kong
     ports:
       - "8080:8080"
     volumes:
@@ -66,6 +69,9 @@ services:
     command: ["npm", "run", "dev"]
     ports:
       - "3000:3000"
+    depends_on:
+      - backend
+      - auction
     environment:
       - NODE_ENV=development
       - NEXT_TELEMETRY_DISABLED=1
@@ -74,6 +80,7 @@ services:
       - WATCHPACK_POLLING=true
       # 依你的後端而定
       - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_AUCTION_API_URL=http://localhost:8081
     volumes:
       # 程式碼雙向同步（Hot Reload）
       - ./business_exchange_marketplace_frontend:/app
@@ -90,10 +97,47 @@ services:
     # 如需自動重啟再打開
     # restart: unless-stopped
 
+  auction:
+    build:
+      context: ./business_exchange_marketplace_auction
+      dockerfile: Dockerfile.dev
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      APP_PORT: 8081
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: app
+      DB_PASSWORD: app_password
+      DB_NAME: business_exchange
+      REDIS_HOST: redis:6379
+      REDIS_DB: 1
+      REDIS_PASSWORD: ""
+      JWT_SECRET: changeme-super-secret
+      JWT_ISSUER: trade_company
+      JWT_EXPIRE_MINUTES: 60
+      TZ: Asia/Hong_Kong
+    ports:
+      - "8081:8081"
+    volumes:
+      # For development: mount source code for hot reload
+      - ./business_exchange_marketplace_auction:/app
+      - /app/bin
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   adminer:
     image: adminer:4
     ports:
-      - "8081:8080"
+      - "8082:8080"
     depends_on:
       - mysql
 

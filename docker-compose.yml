@@ -10,6 +10,7 @@ services:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
+      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
@@ -62,8 +63,10 @@ services:
     environment:
       NODE_ENV: development
       NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_PUBLIC_AUCTION_API_URL: http://localhost:8081
     depends_on:
       - backend
+      - auction
     volumes:
       # For development: mount source code for hot reload
       - ./business_exchange_marketplace_frontend:/app
@@ -71,10 +74,36 @@ services:
       - /app/.next
     command: npm run dev
 
+  auction:
+    build:
+      context: ./business_exchange_marketplace_auction
+      dockerfile: Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_PORT: 8081
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: app
+      DB_PASSWORD: app_password
+      DB_NAME: auction_service
+      REDIS_HOST: redis:6379
+      REDIS_DB: 1
+      REDIS_PASSWORD: ""
+      JWT_SECRET: changeme-super-secret
+      JWT_ISSUER: trade_company
+      JWT_EXPIRE_MINUTES: 60
+    ports:
+      - "8081:8081"
+
   adminer:
     image: adminer:4
     ports:
-      - "8081:8080"
+      - "8082:8080"
     depends_on:
       - mysql
 

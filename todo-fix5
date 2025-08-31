@@ -1,0 +1,29 @@
+#19 [frontend internal] load build context
+#19 transferring context: 56.71kB 0.8s done
+#19 DONE 1.2s
+
+#22 [backend internal] load build context
+#22 transferring context: 20.79kB 0.8s done
+#22 DONE 1.6s
+------
+ > [auction 5/7] COPY go.mod go.sum ./:
+------
+Dockerfile.dev:13
+
+--------------------
+
+  11 |     
+
+  12 |     # 複製 go mod 檔案
+
+  13 | >>> COPY go.mod go.sum ./
+
+  14 |     
+
+  15 |     # 下載依賴
+
+--------------------
+
+target auction: failed to solve: failed to compute cache key: failed to calculate checksum of ref 8d6e8e32-b1c1-4bb5-a95c-281828f90839::rdq1qt5kn1v31gi377xyziqqy: "/go.sum": not found
+
+make: *** [Makefile:32: dev] Error 1
