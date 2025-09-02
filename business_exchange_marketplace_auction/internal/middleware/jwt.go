@@ -17,7 +17,7 @@ const (
 )
 
 type JWTClaims struct {
-	UserID uint   `json:"uid"`        // Match main backend format exactly
+	UserID uint   `json:"uid"` // Match main backend format exactly
 	Email  string `json:"email"`
 	Role   string `json:"role,omitempty"` // Optional field
 	jwt.RegisteredClaims
@@ -26,7 +26,8 @@ type JWTClaims struct {
 func JWT(cfg *config.Config) gin.HandlerFunc {
 	// Get logger from gin context or create a no-op logger
 	logger := zap.NewNop()
-	
+
+	logger.Debug("============= Welcome to JWT =============")
 	return func(c *gin.Context) {
 		// Try to get logger from context
 		if ctxLogger, exists := c.Get("logger"); exists {
@@ -34,11 +35,11 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 				logger = l
 			}
 		}
-		
+
 		requestID := c.GetString("request_id")
 		clientIP := c.ClientIP()
 		userAgent := c.Request.UserAgent()
-		
+
 		logger.Debug("JWT middleware processing request",
 			zap.String("request_id", requestID),
 			zap.String("client_ip", clientIP),
@@ -46,51 +47,71 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 			zap.String("method", c.Request.Method),
 		)
 
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			logger.Warn("Missing Authorization header",
+		var tokenString string
+
+		// First, try to get token from cookie (preferred method)
+		if cookie, err := c.Cookie("authToken"); err == nil && cookie != "" {
+			tokenString = cookie
+			logger.Debug("Token found in cookie",
 				zap.String("request_id", requestID),
-				zap.String("client_ip", clientIP),
-				zap.String("user_agent", userAgent),
 			)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
-				"code":    "unauthorized",
-				"message": "Authorization header required",
-			}})
-			c.Abort()
-			return
+		} else {
+			// Try to get token from Authorization header
+			authHeader := c.GetHeader("Authorization")
+			if authHeader != "" {
+				logger.Debug("Authorization header present",
+					zap.String("request_id", requestID),
+					zap.String("auth_header_prefix", authHeader[:min(20, len(authHeader))]), // Only log first 20 chars for security
+				)
+
+				tokenParts := strings.Split(authHeader, " ")
+				if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
+					logger.Warn("Invalid authorization header format",
+						zap.String("request_id", requestID),
+						zap.String("client_ip", clientIP),
+						zap.Int("token_parts_count", len(tokenParts)),
+						zap.String("first_part", func() string {
+							if len(tokenParts) > 0 {
+								return tokenParts[0]
+							}
+							return ""
+						}()),
+					)
+					c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+						"code":    "unauthorized",
+						"message": "Invalid authorization header format",
+					}})
+					c.Abort()
+					return
+				}
+				tokenString = tokenParts[1]
+			} else {
+				// Try to get token from query parameter (for WebSocket connections)
+				tokenString = c.Query("token")
+				if tokenString == "" {
+					logger.Warn("Missing Authentication: no cookie, Authorization header, or token query parameter",
+						zap.String("request_id", requestID),
+						zap.String("client_ip", clientIP),
+						zap.String("user_agent", userAgent),
+					)
+					c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+						"code":    "unauthorized",
+						"message": "Authentication required: no token found in cookie, Authorization header, or query parameter",
+					}})
+					c.Abort()
+					return
+				}
+				logger.Debug("Token found in query parameter",
+					zap.String("request_id", requestID),
+					zap.Int("token_length", len(tokenString)),
+				)
+			}
 		}
-
-		logger.Debug("Authorization header present",
-			zap.String("request_id", requestID),
-			zap.String("auth_header_prefix", authHeader[:min(20, len(authHeader))]), // Only log first 20 chars for security
-		)
-
-		tokenParts := strings.Split(authHeader, " ")
-		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-			logger.Warn("Invalid authorization header format",
-				zap.String("request_id", requestID),
-				zap.String("client_ip", clientIP),
-				zap.Int("token_parts_count", len(tokenParts)),
-				zap.String("first_part", func() string {
-					if len(tokenParts) > 0 { return tokenParts[0] }
-					return ""
-				}()),
-			)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
-				"code":    "unauthorized",
-				"message": "Invalid authorization header format",
-			}})
-			c.Abort()
-			return
-		}
-
-		tokenString := tokenParts[1]
 		logger.Debug("Parsing JWT token",
 			zap.String("request_id", requestID),
 			zap.Int("token_length", len(tokenString)),
 		)
-		
+
 		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
 			logger.Debug("JWT signing method validation",
 				zap.String("request_id", requestID),
@@ -139,7 +160,7 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 
 		c.Set(UserIDKey, uint64(claims.UserID)) // Store as uint64 for consistency
 		c.Set(UserRoleKey, claims.Role)
-		
+
 		c.Next()
 	}
 }
@@ -160,11 +181,11 @@ func RequireRole(role string) gin.HandlerFunc {
 				logger = l
 			}
 		}
-		
+
 		requestID := c.GetString("request_id")
 		clientIP := c.ClientIP()
 		userID, _ := c.Get(UserIDKey)
-		
+
 		logger.Debug("Role authorization check",
 			zap.String("request_id", requestID),
 			zap.String("required_role", role),

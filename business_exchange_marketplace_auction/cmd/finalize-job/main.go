@@ -39,9 +39,45 @@ func main() {
 	auctionService := &services.AuctionService{DB: db, Logger: logger}
 	notificationService := &services.NotificationService{DB: db, Logger: logger, Config: cfg}
 
+	// 首先自動啟用已過開始時間的 draft 拍賣
+	now := time.Now()
+	var draftAuctions []models.Auction
+	err = db.Where("status_code = ? AND start_at <= ?", 
+		string(models.AuctionStatusDraft), now).Find(&draftAuctions).Error
+	
+	if err != nil {
+		logger.Error("Failed to find draft auctions to activate", zap.Error(err))
+	} else {
+		logger.Info("Found draft auctions to activate", zap.Int("count", len(draftAuctions)))
+		
+		for _, auction := range draftAuctions {
+			logger.Info("Auto-activating auction", zap.Uint64("auction_id", auction.AuctionID))
+			
+			// 更新拍賣狀態為 active
+			auction.StatusCode = string(models.AuctionStatusActive)
+			if err := db.Save(&auction).Error; err != nil {
+				logger.Error("Failed to activate auction",
+					zap.Uint64("auction_id", auction.AuctionID),
+					zap.Error(err),
+				)
+				continue
+			}
+			
+			// 記錄狀態歷史
+			history := &models.AuctionStatusHistory{
+				AuctionID:  auction.AuctionID,
+				FromStatus: string(models.AuctionStatusDraft),
+				ToStatus:   string(models.AuctionStatusActive),
+				Reason:     "Auto-activated (start time reached)",
+			}
+			db.Create(history)
+			
+			logger.Info("Successfully activated auction", zap.Uint64("auction_id", auction.AuctionID))
+		}
+	}
+
 	// 查找需要結束的拍賣
 	var auctions []models.Auction
-	now := time.Now()
 
 	err = db.Where("status_code IN (?) AND (end_at <= ? OR (extended_until IS NOT NULL AND extended_until <= ?))",
 		[]string{string(models.AuctionStatusActive), string(models.AuctionStatusExtended)},

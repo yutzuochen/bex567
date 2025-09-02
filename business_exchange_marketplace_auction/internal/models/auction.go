@@ -38,8 +38,8 @@ const (
 // Auction 拍賣主表
 type Auction struct {
 	AuctionID           uint64        `gorm:"primaryKey;autoIncrement" json:"auction_id"`
-	ListingID           uint64        `gorm:"not null;index" json:"listing_id"`
-	SellerID            uint64        `gorm:"not null;index" json:"seller_id"`
+	ListingID           uint64        `gorm:"not null;index" json:"listing_id"` // References listings.id
+	SellerID            uint64        `gorm:"not null;index" json:"seller_id"` // Must match listings.owner_id
 	AuctionType         AuctionType   `gorm:"type:enum('sealed','english','dutch');default:'sealed'" json:"auction_type"`
 	StatusCode          string        `gorm:"size:16;not null" json:"status_code"`
 	AllowedMinBid       float64       `gorm:"type:decimal(18,2);not null" json:"allowed_min_bid"`
@@ -58,6 +58,7 @@ type Auction struct {
 	// 關聯 (foreign keys handled manually in migrations)
 	StatusRef AuctionStatusRef `gorm:"-" json:"status_ref,omitempty"`
 	Bids      []Bid            `gorm:"-" json:"bids,omitempty"`
+	Listing   *Listing         `gorm:"foreignKey:ListingID" json:"listing,omitempty"`
 }
 
 func (Auction) TableName() string {
@@ -113,4 +114,10 @@ func (a *Auction) ExtendAuction() {
 // ValidateBidAmount 驗證出價金額是否在允許範圍內
 func (a *Auction) ValidateBidAmount(amount float64) bool {
 	return amount >= a.AllowedMinBid && amount <= a.AllowedMaxBid
+}
+
+// ValidateOwnership 驗證拍賣的賣家是否為商品的擁有者
+// 這確保只有商品擁有者才能為其商品創建拍賣
+func (a *Auction) ValidateOwnership(listing *Listing) bool {
+	return a.SellerID == uint64(listing.OwnerID)
 }

@@ -26,14 +26,16 @@ This is a business exchange marketplace platform (類似 BizBuySell) with a comp
 - **Real-time**: WebSocket connections with Hub pattern, degradation control, heartbeat system
 - **Features**: Price range validation, blacklist management, anonymized bidders (Bidder #N), audit logging, notification system
 - **APIs**: REST (`/api/v1/`) + WebSocket (`/ws/`)
-- **Database**: `auction_service` (2 migrations with auctions, bids, blacklist, aliases, notifications)
+- **Database**: `business_exchange` (shared with main platform - auction tables integrated into main database)
 - **Commands**: server, migrate, finalize-job
-- **Background Jobs**: Auction finalization job for automated closing
+- **Background Jobs**: Auction finalization job for automated closing and auto-activation of scheduled auctions
 
 ### Frontend (`business_exchange_marketplace_frontend/`)
 - **Stack**: Next.js 14.2.5, TypeScript, React 18, Tailwind CSS
 - **Architecture**: App Router, centralized API client, protected routes, standalone output for Docker
+- **Authentication**: HttpOnly cookie-based auth with member/guest views, protected routes using async checks
 - **Integration**: Connects to both backend services via REST APIs and WebSocket for real-time auction updates
+- **Member Features**: Dynamic member welcome section at `/market`, dashboard access, user profile display
 - **Optimization**: Hot reload support, polling-based file watching, optimized for Cloud Run deployment
 
 ## Development Commands
@@ -57,7 +59,7 @@ make rebuild          # Rebuild all services
 ```
 
 **Services & Ports:**
-- MySQL: `:3306` (with auto-created `business_exchange` and `auction_service` databases)
+- MySQL: `:3306` (with auto-created `business_exchange` database - shared by both services)
 - Redis: `:6379` (separate DB numbers: backend=0, auction=1)
 - Backend: `:8080`
 - Auction: `:8081` 
@@ -107,7 +109,7 @@ make migrate-down     # Rollback migrations
 make migrate-status   # Check migration status
 
 # Background jobs
-make finalize-job     # Run auction finalization job (uses cmd/finalize-job)
+make finalize-job     # Run auction finalization job (closes expired auctions + auto-activates draft auctions)
 
 # Testing
 make test             # Run tests
@@ -126,7 +128,10 @@ cd business_exchange_marketplace_frontend
 npm run dev           # Development server (:3000)
 npm run build         # Production build
 npm start            # Start production build
-npm run lint         # Run ESLint
+npm run lint         # Run ESLint (validates TypeScript and React code)
+
+# Dependencies
+npm install           # Install dependencies
 ```
 
 ## Key Architecture Patterns
@@ -150,14 +155,18 @@ npm run lint         # Run ESLint
 - **Notification System**: Automated email notifications for auction events and results
 
 ### Authentication Flow
-- **JWT Strategy**: Tokens issued by main backend, validated by auction service
-- **Session Management**: Redis-backed sessions with token refresh
-- **Protected Routes**: Frontend route guards and API middleware
+- **JWT Strategy**: HttpOnly cookies for security, tokens issued by main backend and validated across services
+- **Cookie Implementation**: `SameSite=Lax` for cross-origin localhost development (frontend :3000 → backend :8080)
+- **Session Management**: Redis-backed sessions with automatic token refresh
+- **Protected Routes**: Frontend route guards using async authentication checks (`isAuthenticatedAsync()`)
 - **Cross-Service Auth**: Shared JWT secret for service-to-service validation
+- **Frontend Integration**: API client uses `credentials: 'include'` for automatic cookie handling
+- **Token Validation**: `/api/v1/auth/me` endpoint for checking authentication status
 
 ### Database Strategy  
-- **Service Separation**: Independent MySQL databases per service
-- **Migration Management**: golang-migrate for both services
+- **Consolidated Database**: Both services use the `business_exchange` database
+- **Migration Management**: All migrations managed through main backend (`business_exchange_marketplace/migrations/`)
+- **Auction Integration**: Auction tables integrated via migrations 000016+ (auctions, bids, blacklist, aliases, notifications)
 - **Audit Logging**: Comprehensive tracking of user actions and system events
 - **Event Sourcing**: Auction events stored for replay and analytics
 
@@ -180,21 +189,20 @@ npm run lint         # Run ESLint
 - `business_exchange_marketplace_frontend/env.production`
 
 ### Database Setup
-Both services require MySQL 8.0. The Docker setup automatically creates both databases:
+Both services require MySQL 8.0. The Docker setup automatically creates the shared database:
 ```bash
-# Start databases for both services (auto-creates business_exchange and auction_service DBs)
+# Start databases for both services (auto-creates business_exchange DB - shared by both services)
 make dev
 ```
 
 Database initialization handled by `/scripts/init-databases.sql` which:
-- Creates `business_exchange` database (main platform)
-- Creates `auction_service` database (auction system) 
-- Grants permissions to `app` user for both databases
+- Creates `business_exchange` database (shared by both main platform and auction system)
+- Grants permissions to `app` user for the database
 
 ### Service Dependencies
 - **Redis**: Required for sessions, caching, and WebSocket pub/sub (separate DB numbers per service)
-- **MySQL**: Separate databases for main platform and auction service
-- **JWT Secret**: Must be consistent across services for cross-service auth validation
+- **MySQL**: Shared `business_exchange` database for both main platform and auction service
+- **JWT Secret**: **CRITICAL** - Must be identical across services for cross-service auth validation (check `JWT_SECRET` in both .env files)
 - **Node.js**: Frontend requires Node.js with hot-reload optimizations (CHOKIDAR_USEPOLLING)
 
 ## Common Development Workflows
@@ -213,16 +221,16 @@ Database initialization handled by `/scripts/init-databases.sql` which:
 4. Place bids: `POST /api/v1/auctions/:id/bids` (buyers only, rate-limited)
 5. Monitor real-time updates via WebSocket (bid_accepted, extended, closed events)
 6. Check results: `GET /api/v1/auctions/:id/results` (top 7 bidders shown)
-7. Run finalization: `make finalize-job` (closes expired auctions)
+7. Run finalization: `make finalize-job` (closes expired auctions and auto-activates scheduled ones)
 
 ### Database Operations
-- **Main Platform**: 15 migrations in `business_exchange_marketplace/migrations/`
-  - Core tables: users, listings, images, favorites, messages, transactions
+- **All Migrations**: Centralized in `business_exchange_marketplace/migrations/` (000001-000017)
+  - Core platform tables: users, listings, images, favorites, messages, transactions
   - Extended: user sessions, leads, password resets, audit logs
-- **Auction Service**: 2 migrations in `business_exchange_marketplace_auction/migrations/`  
-  - Core auction tables + status references seeded
-- **Migration Commands**: Use service-specific Makefiles (`make migrate`, `make migrate-status`)
+  - Auction tables: migrations 000016+ (auctions, bids, blacklist, aliases, notifications)
+- **Migration Commands**: Use main backend Makefile (`make migrate`, `make migrate-status` in `business_exchange_marketplace/`)
 - **Seed Data**: Available via `cmd/seed/main.go` in main backend
+- **Auction Service**: No separate migrations - uses shared database
 
 ## Build and Deployment
 
@@ -249,9 +257,15 @@ Database initialization handled by `/scripts/init-databases.sql` which:
 ## API Reference
 
 ### Authentication
-All authenticated endpoints require JWT token in header:
-```
-Authorization: Bearer <JWT_TOKEN>
+Authentication uses HttpOnly cookies automatically sent with requests. For manual testing:
+```bash
+# Login and save cookie
+curl -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"password"}'
+
+# Use saved cookie for authenticated requests  
+curl -b cookies.txt http://localhost:8080/api/v1/auth/me
 ```
 
 ### Main Backend APIs (`business_exchange_marketplace/`)
@@ -280,7 +294,8 @@ Authorization: Bearer <JWT_TOKEN>
 - `DELETE /api/v1/admin/blacklist/:user_id` - Remove from blacklist (admin only)
 
 #### WebSocket Real-time
-- `WS /ws/auctions/:auction_id` - Join auction room for real-time updates
+- `WS /ws/auctions/:auction_id` - Join auction room for real-time updates (requires Authorization header)
+- `WS /ws/test/:auction_id?token=<JWT_TOKEN>` - Test endpoint with JWT token in query parameter (for debugging)
 - `GET /ws/stats` - WebSocket connection statistics and health
 
 #### Health & Monitoring
@@ -317,9 +332,19 @@ Authorization: Bearer <JWT_TOKEN>
 
 ### Common Issues
 - **Database Connection**: Ensure services start after databases are healthy (healthchecks in docker-compose)
-- **Cross-Service Auth**: JWT secrets must match between main backend and auction service
-- **WebSocket Issues**: Check Redis connectivity for pub/sub coordination
+- **Cross-Service Auth**: JWT secrets MUST be identical between main backend and auction service (common cause of WebSocket connection failures)
+- **WebSocket Issues**: Check Redis connectivity for pub/sub coordination and verify JWT token validation
+- **Token Signature Invalid**: Verify `JWT_SECRET` matches exactly in both service .env files
 - **Frontend Hot Reload**: Uses `CHOKIDAR_USEPOLLING=true` for file watching in containers
+
+### Authentication Issues
+- **401 Unauthorized on /auth/me**: Usually expired JWT token (1-hour expiration) - login again for fresh token
+- **Cookies Not Set**: Ensure CORS middleware allows credentials (`Access-Control-Allow-Credentials: true`)
+- **Cross-Origin Cookie Problems**: Backend uses `SameSite=Lax` for localhost development
+- **Frontend API Calls**: Must use `credentials: 'include'` in fetch requests for cookies to work
+- **Protected Routes**: Use `apiClient.isAuthenticatedAsync()` instead of localStorage checks
+- **Member Page Access**: After login, users should see member welcome section at `/market`
+- **Cookie Expiration**: Browser automatically handles expired cookies, backend returns 401 for invalid tokens
 
 ### Service Dependencies
 - **Startup Order**: MySQL → Redis → Backend Services → Frontend

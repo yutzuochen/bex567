@@ -17,26 +17,26 @@ import (
 type Hub struct {
 	// 按拍賣 ID 分組的連接
 	AuctionRooms map[uint64]map[*Connection]bool
-	
+
 	// 連接管理頻道
 	Register   chan *Connection
 	Unregister chan *Connection
-	
+
 	// 廣播頻道
 	Broadcast chan *BroadcastMessage
-	
+
 	// 依賴項
 	DB     *gorm.DB
 	Redis  *redis.Client
 	Logger *zap.Logger
 	Config *config.Config
-	
+
 	// 統計資訊
 	Stats *HubStats
-	
+
 	// 降級管理器
 	DegradationMgr *DegradationManager
-	
+
 	// 互斥鎖
 	mutex sync.RWMutex
 }
@@ -51,11 +51,11 @@ type BroadcastMessage struct {
 
 // HubStats Hub 統計資訊
 type HubStats struct {
-	TotalConnections  int            `json:"total_connections"`
-	AuctionRoomCount  int            `json:"auction_room_count"`
-	AuctionRoomStats  map[uint64]int `json:"auction_room_stats"`
-	DegradedLevel     int            `json:"degraded_level"`
-	LastUpdated       time.Time      `json:"last_updated"`
+	TotalConnections int            `json:"total_connections"`
+	AuctionRoomCount int            `json:"auction_room_count"`
+	AuctionRoomStats map[uint64]int `json:"auction_room_stats"`
+	DegradedLevel    int            `json:"degraded_level"`
+	LastUpdated      time.Time      `json:"last_updated"`
 }
 
 // NewHub 創建新的 Hub
@@ -81,29 +81,29 @@ func NewHub(db *gorm.DB, redis *redis.Client, logger *zap.Logger, config *config
 func (h *Hub) Run(ctx context.Context) {
 	// 啟動統計更新協程
 	go h.updateStats(ctx)
-	
+
 	// 啟動降級監控協程
 	go h.monitorDegradedLevel(ctx)
-	
+
 	// 啟動降級管理器清理協程
 	go h.cleanupDegradationLimiters(ctx)
-	
+
 	// 如果有 Redis，啟動發布訂閱
 	if h.Redis != nil {
 		go h.listenRedisPubSub(ctx)
 	}
-	
+
 	for {
 		select {
 		case conn := <-h.Register:
 			h.registerConnection(conn)
-			
+
 		case conn := <-h.Unregister:
 			h.unregisterConnection(conn)
-			
+
 		case broadcast := <-h.Broadcast:
 			h.broadcastMessage(broadcast)
-			
+
 		case <-ctx.Done():
 			h.Logger.Info("Hub shutting down")
 			h.closeAllConnections()
@@ -116,32 +116,53 @@ func (h *Hub) Run(ctx context.Context) {
 func (h *Hub) registerConnection(conn *Connection) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	
+
 	// 確保拍賣房間存在
 	if h.AuctionRooms[conn.AuctionID] == nil {
 		h.AuctionRooms[conn.AuctionID] = make(map[*Connection]bool)
 	}
-	
+
 	// 檢查同一用戶的連接數限制
 	userConnCount := h.countUserConnections(conn.AuctionID, conn.UserID)
-	if userConnCount >= 3 {
+	h.Logger.Debug("User connection count check",
+		zap.Uint64("user_id", conn.UserID),
+		zap.Uint64("auction_id", conn.AuctionID),
+		zap.Int("current_count", userConnCount),
+		zap.Int("limit", 10),
+	)
+
+	if userConnCount >= 10 { // Temporarily increased for debugging
 		h.Logger.Warn("User connection limit exceeded",
 			zap.Uint64("user_id", conn.UserID),
 			zap.Uint64("auction_id", conn.AuctionID),
+			zap.Int("current_count", userConnCount),
 		)
-		conn.SendMessage(Message{
-			Type: MessageTypeError,
-			Data: map[string]interface{}{
-				"code":    "connection_limit",
-				"message": "Too many connections for this user",
-			},
-		})
-		conn.Close()
-		return
+
+		// 清理可能的死連接
+		h.cleanupDeadConnections(conn.AuctionID, conn.UserID)
+
+		// 重新檢查連接數
+		userConnCount = h.countUserConnections(conn.AuctionID, conn.UserID)
+		h.Logger.Debug("After cleanup connection count",
+			zap.Uint64("user_id", conn.UserID),
+			zap.Int("count_after_cleanup", userConnCount),
+		)
+
+		if userConnCount >= 10 { // Still too many even after cleanup
+			conn.SendMessage(Message{
+				Type: MessageTypeError,
+				Data: map[string]interface{}{
+					"code":    "connection_limit",
+					"message": "Too many connections for this user",
+				},
+			})
+			conn.Close()
+			return
+		}
 	}
-	
+
 	h.AuctionRooms[conn.AuctionID][conn] = true
-	
+
 	h.Logger.Info("WebSocket connection registered",
 		zap.String("connection_id", conn.ID),
 		zap.Uint64("user_id", conn.UserID),
@@ -153,19 +174,26 @@ func (h *Hub) registerConnection(conn *Connection) {
 func (h *Hub) unregisterConnection(conn *Connection) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	
+
 	if room, ok := h.AuctionRooms[conn.AuctionID]; ok {
 		if _, ok := room[conn]; ok {
 			delete(room, conn)
-			close(conn.Send)
-			
+
+			// Safely close the channel
+			select {
+			case <-conn.Send:
+				// Channel already closed
+			default:
+				close(conn.Send)
+			}
+
 			// 如果房間空了，刪除房間
 			if len(room) == 0 {
 				delete(h.AuctionRooms, conn.AuctionID)
 			}
 		}
 	}
-	
+
 	h.Logger.Info("WebSocket connection unregistered",
 		zap.String("connection_id", conn.ID),
 		zap.Uint64("user_id", conn.UserID),
@@ -178,25 +206,25 @@ func (h *Hub) broadcastMessage(broadcast *BroadcastMessage) {
 	h.mutex.RLock()
 	room, ok := h.AuctionRooms[broadcast.AuctionID]
 	h.mutex.RUnlock()
-	
+
 	if !ok {
 		return
 	}
-	
+
 	// 準備訊息資料
 	messageData, err := json.Marshal(broadcast.Message)
 	if err != nil {
 		h.Logger.Error("Failed to marshal broadcast message", zap.Error(err))
 		return
 	}
-	
+
 	// 發送給房間內的連接
 	for conn := range room {
 		// 檢查是否排除此用戶
 		if broadcast.ExcludeUser != nil && conn.UserID == *broadcast.ExcludeUser {
 			continue
 		}
-		
+
 		// 檢查是否在目標用戶列表中
 		if len(broadcast.TargetUsers) > 0 {
 			found := false
@@ -210,14 +238,19 @@ func (h *Hub) broadcastMessage(broadcast *BroadcastMessage) {
 				continue
 			}
 		}
-		
+
+		// Safely send message with proper error handling
 		select {
 		case conn.Send <- messageData:
+			// Message sent successfully
 		default:
-			h.Logger.Warn("Connection send channel full, closing",
+			h.Logger.Warn("Connection send channel full or closed, unregistering",
 				zap.String("connection_id", conn.ID),
 			)
-			close(conn.Send)
+			// Don't close channel here, let unregister handle it
+			go func() {
+				h.Unregister <- conn
+			}()
 			delete(room, conn)
 		}
 	}
@@ -229,7 +262,7 @@ func (h *Hub) countUserConnections(auctionID, userID uint64) int {
 	if !ok {
 		return 0
 	}
-	
+
 	count := 0
 	for conn := range room {
 		if conn.UserID == userID {
@@ -239,37 +272,83 @@ func (h *Hub) countUserConnections(auctionID, userID uint64) int {
 	return count
 }
 
+// cleanupDeadConnections 清理死連接
+func (h *Hub) cleanupDeadConnections(auctionID, userID uint64) {
+	room, ok := h.AuctionRooms[auctionID]
+	if !ok {
+		return
+	}
+
+	var deadConnections []*Connection
+
+	for conn := range room {
+		if conn.UserID == userID {
+			// 檢查連接是否還活著
+			select {
+			case conn.Send <- []byte(`{"type":"ping"}`):
+				// 連接還活著
+			default:
+				// 連接可能已死，標記為待清理
+				deadConnections = append(deadConnections, conn)
+			}
+		}
+	}
+
+	// 清理死連接
+	for _, deadConn := range deadConnections {
+		h.Logger.Info("Cleaning up dead connection",
+			zap.String("connection_id", deadConn.ID),
+			zap.Uint64("user_id", userID),
+			zap.Uint64("auction_id", auctionID),
+		)
+		delete(room, deadConn)
+
+		// 安全關閉通道
+		select {
+		case <-deadConn.Send:
+			// Channel already closed
+		default:
+			close(deadConn.Send)
+		}
+	}
+
+	// 如果房間空了，刪除房間
+	if len(room) == 0 {
+		delete(h.AuctionRooms, auctionID)
+	}
+}
+
 // updateStats 更新統計資訊
 func (h *Hub) updateStats(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
 			h.mutex.RLock()
-			
+
 			totalConnections := 0
 			roomStats := make(map[uint64]int)
-			
+
 			for auctionID, room := range h.AuctionRooms {
 				roomCount := len(room)
 				roomStats[auctionID] = roomCount
 				totalConnections += roomCount
 			}
-			
+
 			h.Stats.TotalConnections = totalConnections
 			h.Stats.AuctionRoomCount = len(h.AuctionRooms)
 			h.Stats.AuctionRoomStats = roomStats
 			h.Stats.LastUpdated = time.Now()
-			
+
 			h.mutex.RUnlock()
-			
+
 			h.Logger.Debug("Hub stats updated",
 				zap.Int("total_connections", totalConnections),
 				zap.Int("auction_rooms", len(h.AuctionRooms)),
 			)
-			
+
 		case <-ctx.Done():
 			return
 		}
@@ -280,7 +359,7 @@ func (h *Hub) updateStats(ctx context.Context) {
 func (h *Hub) monitorDegradedLevel(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
@@ -288,19 +367,19 @@ func (h *Hub) monitorDegradedLevel(ctx context.Context) {
 			if level != h.Stats.DegradedLevel {
 				oldLevel := h.Stats.DegradedLevel
 				h.Stats.DegradedLevel = level
-				
+
 				// 更新降級管理器
 				h.DegradationMgr.UpdateLevel(level)
-				
+
 				h.Logger.Info("Degraded level changed",
 					zap.Int("old_level", oldLevel),
 					zap.Int("new_level", level),
 				)
-				
+
 				// 廣播降級等級變化給所有連接
 				h.broadcastDegradedLevelChange(level)
 			}
-			
+
 		case <-ctx.Done():
 			return
 		}
@@ -312,7 +391,7 @@ func (h *Hub) calculateDegradedLevel() int {
 	h.mutex.RLock()
 	totalConnections := h.Stats.TotalConnections
 	h.mutex.RUnlock()
-	
+
 	// 簡單的降級邏輯（實際應該根據系統負載、錯誤率等）
 	if totalConnections > 1000 {
 		return 4 // 極限負載
@@ -323,7 +402,7 @@ func (h *Hub) calculateDegradedLevel() int {
 	} else if totalConnections > 100 {
 		return 1 // 輕微負載
 	}
-	
+
 	return 0 // 正常
 }
 
@@ -336,12 +415,12 @@ func (h *Hub) broadcastDegradedLevelChange(level int) {
 				"degraded_level": level,
 			},
 		}
-		
+
 		broadcast := &BroadcastMessage{
 			AuctionID: auctionID,
 			Message:   message,
 		}
-		
+
 		select {
 		case h.Broadcast <- broadcast:
 		default:
@@ -354,9 +433,9 @@ func (h *Hub) broadcastDegradedLevelChange(level int) {
 func (h *Hub) listenRedisPubSub(ctx context.Context) {
 	pubsub := h.Redis.Subscribe(ctx, "auction_events")
 	defer pubsub.Close()
-	
+
 	ch := pubsub.Channel()
-	
+
 	for {
 		select {
 		case msg := <-ch:
@@ -374,22 +453,22 @@ func (h *Hub) handleRedisMessage(msg *redis.Message) {
 		Type      string      `json:"type"`
 		Data      interface{} `json:"data"`
 	}
-	
+
 	if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
 		h.Logger.Error("Failed to unmarshal Redis message", zap.Error(err))
 		return
 	}
-	
+
 	message := Message{
 		Type: event.Type,
 		Data: event.Data,
 	}
-	
+
 	broadcast := &BroadcastMessage{
 		AuctionID: event.AuctionID,
 		Message:   message,
 	}
-	
+
 	select {
 	case h.Broadcast <- broadcast:
 	default:
@@ -401,13 +480,19 @@ func (h *Hub) handleRedisMessage(msg *redis.Message) {
 func (h *Hub) closeAllConnections() {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
-	
+
 	for _, room := range h.AuctionRooms {
 		for conn := range room {
-			close(conn.Send)
+			// Safely close the channel
+			select {
+			case <-conn.Send:
+				// Channel already closed
+			default:
+				close(conn.Send)
+			}
 		}
 	}
-	
+
 	h.AuctionRooms = make(map[uint64]map[*Connection]bool)
 }
 
@@ -417,12 +502,12 @@ func (h *Hub) BroadcastToAuction(auctionID uint64, msgType string, data interfac
 		Type: msgType,
 		Data: data,
 	}
-	
+
 	broadcast := &BroadcastMessage{
 		AuctionID: auctionID,
 		Message:   message,
 	}
-	
+
 	// 使用降級管理器控制消息佇列
 	if !h.DegradationMgr.QueueMessage(broadcast) {
 		h.Logger.Warn("Failed to queue message, degradation active",
@@ -432,7 +517,7 @@ func (h *Hub) BroadcastToAuction(auctionID uint64, msgType string, data interfac
 		)
 		return
 	}
-	
+
 	// 嘗試立即發送或加入廣播佇列
 	select {
 	case h.Broadcast <- broadcast:
@@ -450,13 +535,13 @@ func (h *Hub) BroadcastToUser(auctionID, userID uint64, msgType string, data int
 		Type: msgType,
 		Data: data,
 	}
-	
+
 	broadcast := &BroadcastMessage{
 		AuctionID:   auctionID,
 		Message:     message,
 		TargetUsers: []uint64{userID},
 	}
-	
+
 	select {
 	case h.Broadcast <- broadcast:
 	default:
@@ -471,7 +556,7 @@ func (h *Hub) BroadcastToUser(auctionID, userID uint64, msgType string, data int
 func (h *Hub) GetStats() *HubStats {
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
-	
+
 	// 複製統計資訊避免競態條件
 	stats := &HubStats{
 		TotalConnections: h.Stats.TotalConnections,
@@ -480,11 +565,11 @@ func (h *Hub) GetStats() *HubStats {
 		LastUpdated:      h.Stats.LastUpdated,
 		AuctionRoomStats: make(map[uint64]int),
 	}
-	
+
 	for k, v := range h.Stats.AuctionRoomStats {
 		stats.AuctionRoomStats[k] = v
 	}
-	
+
 	return stats
 }
 
@@ -492,7 +577,7 @@ func (h *Hub) GetStats() *HubStats {
 func (h *Hub) cleanupDegradationLimiters(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:

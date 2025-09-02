@@ -57,5 +57,5 @@ echo "  docker-compose -f docker-compose.dev.yml up    - Start development envir
 echo "  docker-compose -f docker-compose.dev.yml down  - Stop development environment"
 echo ""
 echo "🌐 Once started, the API will be available at:"
-echo "  http://localhost:8081/healthz   - Health check"
-echo "  http://localhost:8081/api/v1/   - API endpoints"
+echo "  http://127.0.0.1:8081/healthz   - Health check"
+echo "  http://127.0.0.1:8081/api/v1/   - API endpoints"

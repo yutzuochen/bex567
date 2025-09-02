@@ -27,6 +27,10 @@ func CORS(cfg *config.Config) gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Methods", allowedMethods)
 		c.Header("Access-Control-Allow-Headers", allowedHeaders)
 		c.Header("Access-Control-Allow-Credentials", "true")
+		
+		// WebSocket specific headers
+		c.Header("Access-Control-Allow-Headers", allowedHeaders+",Sec-WebSocket-Extensions,Sec-WebSocket-Key,Sec-WebSocket-Version")
+		c.Header("Access-Control-Expose-Headers", "Sec-WebSocket-Accept")
 
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

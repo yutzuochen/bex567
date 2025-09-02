@@ -29,11 +29,11 @@ type PlaceBidRequest struct {
 
 // PlaceBidResponse 出價響應
 type PlaceBidResponse struct {
-	Accepted    bool       `json:"accepted"`
-	RejectReason string     `json:"reject_reason,omitempty"`
-	ServerTime   time.Time  `json:"server_time"`
+	Accepted     bool           `json:"accepted"`
+	RejectReason string         `json:"reject_reason,omitempty"`
+	ServerTime   time.Time      `json:"server_time"`
 	SoftClose    *SoftCloseInfo `json:"soft_close,omitempty"`
-	EventID      uint64     `json:"event_id"`
+	EventID      uint64         `json:"event_id"`
 }
 
 // SoftCloseInfo 軟關閉資訊
@@ -93,16 +93,16 @@ func (h *BidHandler) PlaceBid(c *gin.Context) {
 	// 檢查出價頻率（5秒內最多1次）
 	var recentBid models.Bid
 	fiveSecondsAgo := time.Now().Add(-5 * time.Second)
-	if err := h.DB.Where("auction_id = ? AND bidder_id = ? AND created_at > ?", 
+	if err := h.DB.Where("auction_id = ? AND bidder_id = ? AND created_at > ?",
 		auctionID, userIDValue, fiveSecondsAgo).First(&recentBid).Error; err == nil {
 		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
-			"code":    "too_frequent",
-			"message": "Bidding too frequently, please wait",
+			"code":             "too_frequent",
+			"message":          "Bidding too frequently, please wait",
 			"cooldown_seconds": 5,
 		}})
 		return
 	}
-
+	h.Logger.Info("start transaction!")
 	// 開始事務
 	tx := h.DB.Begin()
 	defer func() {
@@ -164,14 +164,14 @@ func (h *BidHandler) PlaceBid(c *gin.Context) {
 
 	// 檢查冪等性
 	var existingBid models.Bid
-	if err := tx.Where("auction_id = ? AND bidder_id = ? AND client_seq = ?", 
+	if err := tx.Where("auction_id = ? AND bidder_id = ? AND client_seq = ?",
 		auctionID, userIDValue, req.ClientSeq).First(&existingBid).Error; err == nil {
 		tx.Rollback()
 		c.JSON(http.StatusOK, PlaceBidResponse{
-			Accepted:   existingBid.Accepted,
+			Accepted:     existingBid.Accepted,
 			RejectReason: existingBid.RejectReason,
-			ServerTime: time.Now(),
-			EventID:    0, // 原有記錄不產生新事件
+			ServerTime:   time.Now(),
+			EventID:      0, // 原有記錄不產生新事件
 		})
 		return
 	}
@@ -274,7 +274,7 @@ func (h *BidHandler) PlaceBid(c *gin.Context) {
 			EventType: models.EventTypeExtended,
 		}
 		extendEvent.SetPayload(map[string]interface{}{
-			"extended_until": auction.ExtendedUntil,
+			"extended_until":  auction.ExtendedUntil,
 			"extension_count": auction.ExtensionCount,
 		})
 		if err := tx.Create(extendEvent).Error; err != nil {
@@ -317,28 +317,28 @@ func (h *BidHandler) PlaceBid(c *gin.Context) {
 	// WebSocket 廣播出價事件
 	if h.WSHandler != nil {
 		bidData := map[string]interface{}{
-			"amount":    bid.Amount,
-			"accepted":  true,
-			"event_id":  event.EventID,
+			"amount":      bid.Amount,
+			"accepted":    true,
+			"event_id":    event.EventID,
 			"server_time": response.ServerTime,
 		}
-		
+
 		// 向除了出價者以外的所有參與者廣播
 		h.WSHandler.Hub.BroadcastToAuction(
-			auctionID, 
-			websocket.MessageTypeBidAccepted, 
+			auctionID,
+			websocket.MessageTypeBidAccepted,
 			bidData,
 		)
-		
+
 		// 如果有軟關閉延長，廣播延長事件
 		if softCloseInfo.Extended {
 			extendData := map[string]interface{}{
-				"extended":       true,
-				"extended_until": auction.ExtendedUntil,
+				"extended":        true,
+				"extended_until":  auction.ExtendedUntil,
 				"extension_count": auction.ExtensionCount,
-				"event_id":       event.EventID + 1, // 延長事件ID
+				"event_id":        event.EventID + 1, // 延長事件ID
 			}
-			
+
 			h.WSHandler.Hub.BroadcastToAuction(
 				auctionID,
 				websocket.MessageTypeExtended,

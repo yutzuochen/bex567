@@ -1,0 +1,40 @@
+I wanna turn on precise backend logs (Gin + Gorilla) in backend service.
+
+Add this temporarily to my WS handler to print the true reason be like:
+
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool {
+        log.Printf("[WS] Origin=%s, URL=%s", r.Header.Get("Origin"), r.URL.String())
+        // tighten later; for now allow to see if Origin was the issue
+        return true
+    },
+}
+
+func AuctionWS(c *gin.Context) {
+    // 1) Validate JWT from query (if you depend on it)
+    tok := c.Query("token")
+    if tok == "" || !validateJWT(tok) {
+        log.Println("[WS] reject: missing/invalid token")
+        c.Writer.WriteHeader(http.StatusUnauthorized)
+        return
+    }
+
+    // 2) Upgrade
+    conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+    if err != nil {
+        log.Printf("[WS] Upgrade failed: %v", err) // e.g. "request origin not allowed"
+        return
+    }
+    log.Println("[WS] Upgrade OK")
+    defer conn.Close()
+
+    // 3) Echo loop just to confirm connectivity
+    for {
+        mt, msg, err := conn.ReadMessage()
+        if err != nil {
+            log.Printf("[WS] Read err: %v", err)
+            break
+        }
+        _ = conn.WriteMessage(mt, msg)
+    }
+}

@@ -50,7 +50,7 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_DB: 0
       REDIS_PASSWORD: ""
-      JWT_SECRET: changeme-super-secret
+      JWT_SECRET: your-local-jwt-secret
       JWT_ISSUER: trade_company
       JWT_EXPIRE_MINUTES: 60
       TZ: Asia/Hong_Kong
@@ -78,7 +78,7 @@ services:
       # 下兩行能讓 Hot Reload 在各種環境更穩（WSL/VM/網路檔案系統請務必保留）
       - CHOKIDAR_USEPOLLING=1
       - WATCHPACK_POLLING=true
-      # 依你的後端而定
+      # 依你的後端而定  
       - NEXT_PUBLIC_API_URL=http://localhost:8080
       - NEXT_PUBLIC_AUCTION_API_URL=http://localhost:8081
     volumes:
@@ -117,9 +117,12 @@ services:
       REDIS_HOST: redis:6379
       REDIS_DB: 1
       REDIS_PASSWORD: ""
-      JWT_SECRET: changeme-super-secret
+      JWT_SECRET: your-local-jwt-secret
       JWT_ISSUER: trade_company
       JWT_EXPIRE_MINUTES: 60
+      CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
+      CORS_ALLOWED_METHODS: "GET,POST,PUT,DELETE,OPTIONS"
+      CORS_ALLOWED_HEADERS: "Content-Type,Authorization,X-Idempotency-Key,Sec-WebSocket-Extensions,Sec-WebSocket-Key,Sec-WebSocket-Version"
       TZ: Asia/Hong_Kong
     ports:
       - "8081:8081"

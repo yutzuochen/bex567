@@ -60,13 +60,13 @@ func Load() (*Config, error) {
 		JWTSecret: getEnv("JWT_SECRET", "default-jwt-secret-change-in-production"),
 		JWTIssuer: getEnv("JWT_ISSUER", "auction-service"),
 
-		DBHost:     getEnv("DB_HOST", "localhost"), // TODO:need to modify for deploying to Google Cloud SQL
+		DBHost:     getEnv("DB_HOST", "127.0.0.1"), // TODO:need to modify for deploying to Google Cloud SQL
 		DBPort:     getEnv("DB_PORT", "3306"),
 		DBUser:     getEnv("DB_USER", "app"),
 		DBPassword: getEnv("DB_PASSWORD", "app_password"),
 		DBName:     getEnv("DB_NAME", "business_exchange"),
 
-		RedisHost:     getEnv("REDIS_HOST", "localhost"),
+		RedisHost:     getEnv("REDIS_HOST", "127.0.0.1"),
 		RedisPort:     getEnv("REDIS_PORT", "6379"),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
 		RedisDB:       getEnvAsInt("REDIS_DB", 0),
@@ -80,7 +80,7 @@ func Load() (*Config, error) {
 		DegradedRedisErrorThreshold: getEnvAsInt("DEGRADED_REDIS_ERROR_THRESHOLD", 5),
 		DegradedDBLatencyThreshold:  getEnvAsInt("DEGRADED_DB_LATENCY_THRESHOLD", 500),
 
-		CORSAllowedOrigins: getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000"),
+		CORSAllowedOrigins: getEnv("CORS_ALLOWED_ORIGINS", "http://127.0.0.1:3000"),
 		CORSAllowedMethods: getEnv("CORS_ALLOWED_METHODS", "GET,POST,PUT,DELETE,OPTIONS"),
 		CORSAllowedHeaders: getEnv("CORS_ALLOWED_HEADERS", "Content-Type,Authorization,X-Idempotency-Key"),
 	}
