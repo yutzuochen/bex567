@@ -1,0 +1,728 @@
+openapi: 3.1.0
+info:
+  title: Auction Service API
+  version: 1.0.0
+  description: |
+    English-style (ascending, open outcry) auction API designed for a Go (transactional REST)
+    + Node.js (WebSocket gateway) + MySQL stack. Includes anti-sniping (soft-close),
+    blacklist enforcement, idempotent writes, and event stream endpoints.
+
+    ## Conventions
+    - **Auth**: JWT via `Authorization: Bearer <token>` or cookie `session` (see `cookieAuth`).
+    - **Time**: ISO 8601 UTC (e.g., `2025-09-15T02:00:00Z`).
+    - **Idempotency**: All mutating endpoints that can be retried must include `Idempotency-Key` header.
+    - **Anti-sniping**: Within `soft_close_window_secs` of `end_time`, a valid bid extends the auction by `soft_close_extend_secs`.
+    - **Anonymized bidders**: If `anonymize_bidders=true`, clients should mask bidder identity in UI (server still returns IDs unless `mask_bidders=true` query is used).
+
+servers:
+  - url: https://api.example.com
+    description: Production
+  - url: https://staging.api.example.com
+    description: Staging
+  - url: http://localhost:8080
+    description: Local
+
+tags:
+  - name: Auctions
+    description: Create, manage, and query auctions
+  - name: Bids
+    description: Place and list bids
+  - name: Events
+    description: Immutable event stream for audits and realtime backfills
+  - name: Blacklist
+    description: Staff-maintained user blacklist
+  - name: System
+    description: Health and service info
+
+externalDocs:
+  description: WebSocket Gateway (Node.js)
+  url: https://ws.example.com/docs
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+
+  parameters:
+    AuctionId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 1 }
+      description: Auction ID
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+      description: Maximum number of items to return
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, nullable: true }
+      description: Opaque cursor for pagination
+    MaskBidders:
+      name: mask_bidders
+      in: query
+      schema: { type: boolean, default: false }
+      description: If true, server masks bidder identity in responses where applicable
+    Status:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [DRAFT, SCHEDULED, RUNNING, ENDED, CANCELLED]
+      description: Filter by auction status
+    ListingIdQ:
+      name: listing_id
+      in: query
+      schema: { type: integer, format: int64 }
+      description: Filter by listing id
+    Since:
+      name: since
+      in: query
+      schema: { type: string, format: date-time }
+      description: Return events created at or after this timestamp
+
+  headers:
+    IdempotencyKey:
+      description: Unique key (UUID) to guarantee idempotent processing of a request
+      schema: { type: string, format: uuid }
+      required: true
+    RateLimit-Limit:
+      description: The rate limit ceiling for that given endpoint
+      schema: { type: integer }
+    RateLimit-Remaining:
+      description: The number of requests left for the time window
+      schema: { type: integer }
+    RateLimit-Reset:
+      description: UTC epoch seconds when the current rate limit window resets
+      schema: { type: integer, format: int64 }
+
+  responses:
+    RateLimited:
+      description: Too Many Requests
+      headers:
+        X-RateLimit-Limit: { $ref: '#/components/headers/RateLimit-Limit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimit-Remaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/RateLimit-Reset' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            rate_limited:
+              value:
+                error:
+                  code: 429_RATE_LIMITED
+                  message: Too many requests. Please retry after reset.
+                  meta: { retry_after: 12 }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code
+              enum:
+                - 400_BAD_REQUEST
+                - 400_UNDER_MIN_INCREMENT
+                - 400_INVALID_STATE
+                - 400_INVALID_TIME_RANGE
+                - 401_UNAUTHORIZED
+                - 403_BLACKLISTED
+                - 403_FORBIDDEN
+                - 404_NOT_FOUND
+                - 409_CONFLICT
+                - 409_ACTIVE_AUCTION_EXISTS
+                - 409_OUTBID_RACE
+                - 409_AUCTION_NOT_RUNNING
+                - 409_BUY_IT_NOW_ONLY
+                - 422_UNPROCESSABLE_ENTITY
+                - 500_INTERNAL_ERROR
+            message:
+              type: string
+            meta:
+              type: object
+              additionalProperties: true
+
+    Currency:
+      type: string
+      enum: [TWD, USD, EUR, JPY]
+      default: TWD
+
+    AuctionType:
+      type: string
+      enum: [ENGLISH_OPEN]
+      default: ENGLISH_OPEN
+
+    AuctionStatus:
+      type: string
+      enum: [DRAFT, SCHEDULED, RUNNING, ENDED, CANCELLED]
+
+    AuctionCreate:
+      type: object
+      required: [listing_id, start_time, end_time]
+      properties:
+        listing_id: { type: integer, format: int64, minimum: 1 }
+        start_time: { type: string, format: date-time }
+        end_time: { type: string, format: date-time }
+        reserve_price: { type: number, format: double, nullable: true, example: 500000 }
+        min_increment: { type: number, format: double, default: 10000 }
+        currency: { $ref: '#/components/schemas/Currency' }
+        buy_it_now: { type: number, format: double, nullable: true }
+        soft_close_window_secs: { type: integer, minimum: 0, default: 180 }
+        soft_close_extend_secs: { type: integer, minimum: 0, default: 60 }
+        anonymize_bidders: { type: boolean, default: false }
+
+    AuctionCreated:
+      type: object
+      required: [id, status, version]
+      properties:
+        id: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/AuctionStatus' }
+        version: { type: integer, format: int64 }
+
+    AuctionDetail:
+      type: object
+      required:
+        - id
+        - listing_id
+        - seller_id
+        - status
+        - start_time
+        - end_time
+        - min_increment
+        - currency
+        - soft_close_window_secs
+        - soft_close_extend_secs
+        - anonymize_bidders
+      properties:
+        id: { type: integer, format: int64 }
+        listing_id: { type: integer, format: int64 }
+        seller_id: { type: integer, format: int64 }
+        type: { $ref: '#/components/schemas/AuctionType' }
+        status: { $ref: '#/components/schemas/AuctionStatus' }
+        start_time: { type: string, format: date-time }
+        end_time: { type: string, format: date-time }
+        reserve_price: { type: number, format: double, nullable: true }
+        min_increment: { type: number, format: double }
+        buy_it_now: { type: number, format: double, nullable: true }
+        soft_close_window_secs: { type: integer }
+        soft_close_extend_secs: { type: integer }
+        anonymize_bidders: { type: boolean }
+        current_price: { type: number, format: double, nullable: true }
+        highest_bidder_id: { type: integer, format: int64, nullable: true }
+        reserve_met: { type: boolean, default: false }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AuctionListItem:
+      allOf:
+        - $ref: '#/components/schemas/AuctionDetail'
+      description: Same shape as detail; servers may omit heavy fields for lists
+
+    AuctionsList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AuctionListItem' }
+        next_cursor:
+          type: string
+          nullable: true
+
+    AuctionUpdate:
+      type: object
+      description: Patch fields allowed while auction has not started (DRAFT/SCHEDULED)
+      properties:
+        start_time: { type: string, format: date-time }
+        end_time: { type: string, format: date-time }
+        reserve_price: { type: number, format: double, nullable: true }
+        min_increment: { type: number, format: double }
+        buy_it_now: { type: number, format: double, nullable: true }
+        soft_close_window_secs: { type: integer, minimum: 0 }
+        soft_close_extend_secs: { type: integer, minimum: 0 }
+        anonymize_bidders: { type: boolean }
+
+    BidCreate:
+      type: object
+      required: [amount]
+      properties:
+        amount: { type: number, format: double, minimum: 0.01 }
+        max_proxy_amount: { type: number, format: double, nullable: true }
+      examples:
+        simple:
+          value: { amount: 640000 }
+        proxy:
+          value: { amount: 640000, max_proxy_amount: 700000 }
+
+    BidPlaced:
+      type: object
+      required: [bid_id, auction_id, effective_price, highest_bidder_id]
+      properties:
+        bid_id: { type: integer, format: int64 }
+        auction_id: { type: integer, format: int64 }
+        effective_price: { type: number, format: double }
+        highest_bidder_id: { type: integer, format: int64 }
+        reserve_met: { type: boolean }
+        extended:
+          type: object
+          nullable: true
+          properties:
+            added_secs: { type: integer }
+            new_end_time: { type: string, format: date-time }
+
+    Bid:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        auction_id: { type: integer, format: int64 }
+        bidder_id: { type: integer, format: int64 }
+        amount: { type: number, format: double }
+        max_proxy_amount: { type: number, format: double, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    BidsList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Bid' }
+        next_cursor:
+          type: string
+          nullable: true
+
+    AuctionEventType:
+      type: string
+      enum: [BID_PLACED, OUTBID, AUCTION_EXTENDED, AUCTION_ENDED, RESERVE_MET]
+
+    AuctionEvent:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        auction_id: { type: integer, format: int64 }
+        event_type: { $ref: '#/components/schemas/AuctionEventType' }
+        payload:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+
+    EventsList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AuctionEvent' }
+        next_cursor:
+          type: string
+          nullable: true
+
+    BlacklistAddReq:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: integer, format: int64 }
+        reason: { type: string, maxLength: 255 }
+
+    BlacklistEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        user_id: { type: integer, format: int64 }
+        is_active: { type: boolean }
+        reason: { type: string, nullable: true }
+        noted_by: { type: integer, format: int64, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    BlacklistList:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/BlacklistEntry' }
+        next_cursor:
+          type: string
+          nullable: true
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/auctions:
+    post:
+      tags: [Auctions]
+      summary: Create auction (seller)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuctionCreate' }
+            examples:
+              create:
+                value:
+                  listing_id: 123
+                  start_time: '2025-09-05T02:00:00Z'
+                  end_time: '2025-09-15T02:00:00Z'
+                  reserve_price: 500000
+                  min_increment: 10000
+                  currency: TWD
+                  soft_close_window_secs: 180
+                  soft_close_extend_secs: 60
+                  anonymize_bidders: false
+      responses:
+        '201':
+          description: Created
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimit-Limit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimit-Remaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimit-Reset' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuctionCreated' }
+        '400':
+          description: Bad Request
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401':
+          description: Unauthorized
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                active_exists:
+                  value:
+                    error:
+                      code: 409_ACTIVE_AUCTION_EXISTS
+                      message: An active auction already exists for this listing.
+    get:
+      tags: [Auctions]
+      summary: List auctions
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Status'
+        - $ref: '#/components/parameters/ListingIdQ'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimit-Limit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimit-Remaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimit-Reset' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuctionsList' }
+
+  /api/v1/auctions/{id}:
+    get:
+      tags: [Auctions]
+      summary: Get auction detail
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+        - $ref: '#/components/parameters/MaskBidders'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuctionDetail' }
+        '404':
+          description: Not Found
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    patch:
+      tags: [Auctions]
+      summary: Update editable fields (before start)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuctionUpdate' }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AuctionDetail' } } }
+        '400': { description: Bad Request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /api/v1/auctions/{id}/start:
+    post:
+      tags: [Auctions]
+      summary: Start auction (seller)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AuctionDetail' } } }
+        '400': { description: Bad Request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /api/v1/auctions/{id}/cancel:
+    post:
+      tags: [Auctions]
+      summary: Cancel auction (seller; if not ended)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AuctionDetail' } } }
+        '409':
+          description: Conflict
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /api/v1/auctions/{id}/close:
+    post:
+      tags: [Auctions]
+      summary: Close auction (job/manual fallback)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer, format: int64 }
+                  final_price: { type: number, format: double, nullable: true }
+                  winner_id: { type: integer, format: int64, nullable: true }
+                  reserve_met: { type: boolean }
+                  ended_at: { type: string, format: date-time }
+
+  /api/v1/auctions/{id}/bids:
+    get:
+      tags: [Bids]
+      summary: List bids for an auction
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/MaskBidders'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BidsList' }
+    post:
+      tags: [Bids]
+      summary: Place a bid
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BidCreate' }
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimit-Limit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimit-Remaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimit-Reset' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BidPlaced' }
+              examples:
+                placed:
+                  value:
+                    bid_id: 55501
+                    auction_id: 9001
+                    effective_price: 640000
+                    highest_bidder_id: 42
+                    reserve_met: true
+                    extended:
+                      added_secs: 60
+                      new_end_time: '2025-09-15T02:01:00Z'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                under_increment:
+                  value:
+                    error:
+                      code: 400_UNDER_MIN_INCREMENT
+                      message: Bid must be at least current_price + min_increment
+                      meta: { current_price: 630000, min_increment: 10000 }
+        '403':
+          description: Forbidden (e.g., blacklisted)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: Conflict (race / invalid state)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                not_running:
+                  value:
+                    error:
+                      code: 409_AUCTION_NOT_RUNNING
+                      message: Auction is not running.
+                outbid_race:
+                  value:
+                    error:
+                      code: 409_OUTBID_RACE
+                      message: Your bid was outbid during processing.
+                      meta: { current_price: 650000 }
+
+  /api/v1/auctions/{id}/buy-now:
+    post:
+      tags: [Bids]
+      summary: Buy-it-now (if configured)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ended: { type: boolean }
+                  final_price: { type: number, format: double }
+                  winner_id: { type: integer, format: int64 }
+        '409':
+          description: Conflict
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /api/v1/auctions/{id}/events:
+    get:
+      tags: [Events]
+      summary: Pull event stream (backfill/polling)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AuctionId'
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventsList' }
+
+  /api/v1/blacklist:
+    get:
+      tags: [Blacklist]
+      summary: List blacklist entries
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BlacklistList' }
+    post:
+      tags: [Blacklist]
+      summary: Add user to blacklist (staff)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BlacklistAddReq' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BlacklistEntry' }
+
+  /api/v1/blacklist/{user_id}:
+    delete:
+      tags: [Blacklist]
+      summary: Deactivate blacklist entry for a user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BlacklistEntry' }
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+x-websocket:
+  gateway_url: wss://ws.example.com
+  connect:
+    path: /ws
+    query:
+      - name: auctionId
+        type: integer
+      - name: token
+        type: string
+  messages:
+    server_to_client_examples:
+      - type: BID_PLACED
+        auction_id: 9001
+        payload:
+          bid_id: 55501
+          effective_price: 640000
+          highest_bidder_id: 42
+          at: '2025-09-10T03:11:23Z'
+      - type: AUCTION_EXTENDED
+        auction_id: 9001
+        payload:
+          added_secs: 60
+          new_end_time: '2025-09-15T02:01:00Z'
+      - type: AUCTION_ENDED
+        auction_id: 9001
+        payload:
+          winner_id: 42
+          final_price: 690000
+          reserve_met: true
+          at: '2025-09-15T02:01:00Z'

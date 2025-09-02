@@ -17,7 +17,7 @@ This is a business exchange marketplace platform (類似 BizBuySell) with a comp
 - **Features**: User auth, business listings, messaging, transactions, favorites, audit logging
 - **Authentication**: JWT tokens with Redis session management
 - **APIs**: REST (`/api/v1/`) + GraphQL (`/graphql`)
-- **Database**: `business_exchange` (15 migrations with users, listings, images, favorites, messages, transactions, leads, password resets, audit logs)
+- **Database**: `business_exchange` (17 migrations with users, listings, images, favorites, messages, transactions, leads, password resets, audit logs)
 - **Commands**: server, migrate, seed
 
 ### Auction Service (`business_exchange_marketplace_auction/`)
@@ -197,7 +197,17 @@ make dev
 
 Database initialization handled by `/scripts/init-databases.sql` which:
 - Creates `business_exchange` database (shared by both main platform and auction system)
-- Grants permissions to `app` user for the database
+- Creates `auction_service` database (for potential separate auction service deployment)
+- Grants permissions to `app` user for both databases
+
+### Migration Management
+- **Critical**: All migrations are managed through the main backend (`business_exchange_marketplace/migrations/`)
+- Current migration count: 000001-000017 
+- **Migration Version Sync**: If database shows version mismatch (e.g., version 20 when files only go to 017), use the force command:
+  ```bash
+  cd business_exchange_marketplace
+  go run ./cmd/migrate -action=force -version=17
+  ```
 
 ### Service Dependencies
 - **Redis**: Required for sessions, caching, and WebSocket pub/sub (separate DB numbers per service)
@@ -346,10 +356,34 @@ curl -b cookies.txt http://localhost:8080/api/v1/auth/me
 - **Member Page Access**: After login, users should see member welcome section at `/market`
 - **Cookie Expiration**: Browser automatically handles expired cookies, backend returns 401 for invalid tokens
 
+### Migration Issues
+- **Migration Version Mismatch**: If `make migrate` fails with "no migration found for version X", the database schema_migrations table version doesn't match available migration files
+  - Check current version: `make migrate-status` 
+  - Reset to correct version: `go run ./cmd/migrate -action=force -version=17`
+  - **Dirty State**: If migration status shows "Dirty: true", use force command to clean the state
+
 ### Service Dependencies
 - **Startup Order**: MySQL → Redis → Backend Services → Frontend
 - **Port Conflicts**: Ensure ports 3000, 3306, 6379, 8080, 8081, 8082 are available
 - **Environment Files**: Copy from respective `env.example` files in each service
+
+## Key Development Tasks
+
+### Adding Sample Images to Market Page
+If the market page shows "無圖片" (no image) placeholders:
+```bash
+# Check if images exist in database
+docker exec bex567-mysql-1 mysql -u app -papp_password business_exchange -e "SELECT COUNT(*) FROM images;"
+
+# If count is 0, add sample images for existing listings
+docker exec bex567-mysql-1 mysql -u app -papp_password business_exchange -e "INSERT INTO images (listing_id, filename, url, alt_text, \`order\`, is_primary, created_at, updated_at) SELECT id, CONCAT(LOWER(REPLACE(title, ' ', '_')), '.jpg'), CONCAT('http://localhost:8080/static/images/listings/', CASE WHEN id % 27 = 1 THEN 'happy_coffee.jpg' WHEN id % 27 = 2 THEN 'pet_grooming.jpg' ELSE 'bakery.jpg' END), title, 0, 1, NOW(), NOW() FROM listings WHERE id NOT IN (SELECT DISTINCT listing_id FROM images);"
+```
+
+### Database Seeding Issues
+If seed data fails due to foreign key constraints:
+- The auction system creates foreign key dependencies that prevent normal seeding
+- Use manual SQL inserts for images as shown above
+- Or temporarily disable foreign key checks during seeding
 
 # Important Instructions
 Do what has been asked; nothing more, nothing less.

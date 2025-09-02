@@ -7,7 +7,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// DegradationManager 降級管理器
+// DegradationManager handles system load-based message throttling and connection limits
+// implementing a 5-level degradation system (0-4) with adaptive rate limiting
 type DegradationManager struct {
 	level           int
 	messageQueue    chan *BroadcastMessage
@@ -17,7 +18,8 @@ type DegradationManager struct {
 	logger          *zap.Logger
 }
 
-// ConnectionRateLimiter 連接速率限制器
+// ConnectionRateLimiter tracks per-user message rates within time windows
+// for implementing degradation-aware throttling policies
 type ConnectionRateLimiter struct {
 	UserID       uint64
 	LastMessage  time.Time
@@ -48,7 +50,8 @@ func (dm *DegradationManager) UpdateLevel(level int) {
 	}
 }
 
-// ShouldThrottleMessage 判斷是否應該限流消息
+// ShouldThrottleMessage determines if a user's message should be throttled
+// based on current degradation level, message frequency, and rate limits
 func (dm *DegradationManager) ShouldThrottleMessage(userID uint64, msgType string) bool {
 	dm.rateLimiterMux.Lock()
 	defer dm.rateLimiterMux.Unlock()
@@ -93,7 +96,8 @@ func (dm *DegradationManager) ShouldThrottleMessage(userID uint64, msgType strin
 	return false
 }
 
-// IsHighPriorityMessage 判斷是否為高優先級消息
+// IsHighPriorityMessage identifies critical messages that bypass normal throttling
+// including auction extensions, closures, and error notifications
 func (dm *DegradationManager) IsHighPriorityMessage(msgType string) bool {
 	switch msgType {
 	case MessageTypeExtended, MessageTypeClosed, MessageTypeError:
@@ -103,7 +107,8 @@ func (dm *DegradationManager) IsHighPriorityMessage(msgType string) bool {
 	}
 }
 
-// QueueMessage 將消息加入佇列
+// QueueMessage adds messages to either priority or normal queues
+// with different capacity limits based on message importance
 func (dm *DegradationManager) QueueMessage(msg *BroadcastMessage) bool {
 	if dm.IsHighPriorityMessage(msg.Message.Type) {
 		select {
@@ -152,7 +157,8 @@ func (dm *DegradationManager) adjustRateLimits(level int) {
 	}
 }
 
-// getMaxMessagesPerWindow 根據降級等級獲取每窗口最大消息數
+// getMaxMessagesPerWindow returns the maximum messages allowed per minute
+// based on current degradation level: 60/30/15/5/1 messages for levels 0-4
 func (dm *DegradationManager) getMaxMessagesPerWindow() int {
 	switch dm.level {
 	case 0: // 正常
@@ -170,7 +176,8 @@ func (dm *DegradationManager) getMaxMessagesPerWindow() int {
 	}
 }
 
-// getMinMessageInterval 根據降級等級獲取最小消息間隔
+// getMinMessageInterval returns the minimum time between messages
+// based on degradation level: 100ms/500ms/2s/5s/30s for levels 0-4
 func (dm *DegradationManager) getMinMessageInterval() time.Duration {
 	switch dm.level {
 	case 0: // 正常

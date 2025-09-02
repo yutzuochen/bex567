@@ -62,6 +62,7 @@ func NewRouter(cfg *config.Config, logger *zap.Logger, db *gorm.DB, redisClient 
 	auctionHandler := &AuctionHandler{DB: db, Logger: logger, WSHandler: wsHandler}
 	bidHandler := &BidHandler{DB: db, Logger: logger, WSHandler: wsHandler}
 	blacklistHandler := &BlacklistHandler{DB: db, Logger: logger}
+	authHandler := &AuthHandler{DB: db, Logger: logger, JWTSecret: cfg.JWTSecret}
 
 	// API v1 路由
 	api := r.Group("/api/v1")
@@ -75,6 +76,9 @@ func NewRouter(cfg *config.Config, logger *zap.Logger, db *gorm.DB, redisClient 
 		auth := api.Group("")
 		auth.Use(middleware.JWT(cfg))
 		{
+			// 認證相關
+			auth.GET("/auth/ws-token", authHandler.GetWebSocketToken)
+
 			// 拍賣管理（賣家）
 			auth.POST("/auctions", auctionHandler.CreateAuction)
 			auth.POST("/auctions/:id/activate", auctionHandler.ActivateAuction)
@@ -82,6 +86,7 @@ func NewRouter(cfg *config.Config, logger *zap.Logger, db *gorm.DB, redisClient 
 
 			// 出價（買家）
 			auth.POST("/auctions/:id/bids", bidHandler.PlaceBid)
+			auth.POST("/auctions/:id/buy-now", bidHandler.BuyItNow) // 英式拍賣直購
 			auth.GET("/auctions/:id/my-bids", bidHandler.GetMyBids)
 			auth.GET("/auctions/:id/results", bidHandler.GetAuctionResults)
 

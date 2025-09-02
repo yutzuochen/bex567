@@ -3,6 +3,7 @@ package websocket
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	// To avoid Cross-site WebSocket hijacking
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		userAgent := r.Header.Get("User-Agent")
@@ -32,7 +34,8 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// Connection WebSocket 連接
+// Connection represents a WebSocket connection for a specific user in an auction room
+// with message handling, heartbeat monitoring, and bidding capabilities
 type Connection struct {
 	ID            string
 	AuctionID     uint64
@@ -46,7 +49,8 @@ type Connection struct {
 	DegradedLevel int
 }
 
-// Message WebSocket 訊息格式
+// Message defines the standard WebSocket message format sent to clients
+// with type, data payload, event ID for ordering, and server timestamp
 type Message struct {
 	Type       string      `json:"type"`
 	Data       interface{} `json:"data,omitempty"`
@@ -54,7 +58,8 @@ type Message struct {
 	ServerTime time.Time   `json:"server_time"`
 }
 
-// ClientMessage 客戶端訊息
+// ClientMessage represents messages received from WebSocket clients
+// supporting bid placement, connection resume, and heartbeat responses
 type ClientMessage struct {
 	Type        string  `json:"type"`
 	Amount      float64 `json:"amount,omitempty"`
@@ -74,6 +79,13 @@ const (
 	MessageTypePing        = "ping"
 	MessageTypePong        = "pong"
 	MessageTypeError       = "error"
+	
+	// 英式拍賣特定訊息類型
+	MessageTypePriceChanged  = "price_changed"  // 當前價格更新
+	MessageTypeReserveMet    = "reserve_met"    // 達到保留價
+	MessageTypeOutbid        = "outbid"         // 被超越出價
+	MessageTypeBuyItNow      = "buy_it_now"     // 直購執行
+	MessageTypeLeaderboard   = "leaderboard"    // 排行榜更新（英式拍賣）
 
 	// 客戶端訊息類型
 	ClientMessageTypePlaceBid = "place_bid"
@@ -104,18 +116,24 @@ func NewConnection(hub *Hub, conn *websocket.Conn, auctionID, userID uint64, log
 	}
 }
 
-// Start 啟動連接處理
+// Start initializes the WebSocket connection by registering with the hub,
+// starting read/write pumps, and sending the initial hello message
 func (c *Connection) Start() {
-	c.Logger.Debug("Starting connection",
+	startTime := time.Now()
+	c.Logger.Info("Starting WebSocket connection",
 		zap.String("connection_id", c.ID),
 		zap.Uint64("auction_id", c.AuctionID),
 		zap.Uint64("user_id", c.UserID),
+		zap.String("remote_addr", c.Conn.RemoteAddr().String()),
+		zap.Time("start_time", startTime),
 	)
 
+	// Register with hub
 	c.Hub.Register <- c
 
-	c.Logger.Debug("Connection registered, starting pumps first",
+	c.Logger.Debug("Connection registered, starting pumps",
 		zap.String("connection_id", c.ID),
+		zap.Duration("registration_time", time.Since(startTime)),
 	)
 
 	// Start pumps BEFORE sending messages to avoid race condition
@@ -124,13 +142,32 @@ func (c *Connection) Start() {
 
 	c.Logger.Debug("Pumps started, sending hello message",
 		zap.String("connection_id", c.ID),
+		zap.Duration("pump_start_time", time.Since(startTime)),
 	)
 
-	// 發送歡迎訊息 (after pumps are running)
-	c.sendHelloMessage()
+	// Send welcome message in a goroutine to avoid blocking
+	go func() {
+		// Give a small delay to ensure pumps are fully started
+		time.Sleep(50 * time.Millisecond)
+		
+		// Check if connection is still alive before sending hello
+		if c.Conn != nil {
+			c.sendHelloMessage()
+			
+			c.Logger.Info("WebSocket connection fully initialized",
+				zap.String("connection_id", c.ID),
+				zap.Duration("total_startup_time", time.Since(startTime)),
+			)
+		} else {
+			c.Logger.Debug("Connection closed before hello message could be sent",
+				zap.String("connection_id", c.ID),
+			)
+		}
+	}()
 }
 
-// readPump 處理讀取訊息
+// readPump handles incoming messages from the WebSocket client
+// with proper error handling, pong responses, and message routing
 func (c *Connection) readPump() {
 	c.Logger.Debug("Starting readPump",
 		zap.String("connection_id", c.ID),
@@ -155,16 +192,38 @@ func (c *Connection) readPump() {
 	for {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
+			// Enhanced error logging for debugging
+			closeCode := websocket.CloseNoStatusReceived
+			if closeErr, ok := err.(*websocket.CloseError); ok {
+				closeCode = closeErr.Code
+			}
+			
 			c.Logger.Debug("ReadMessage error in readPump",
 				zap.String("connection_id", c.ID),
+				zap.Uint64("user_id", c.UserID),
+				zap.Uint64("auction_id", c.AuctionID),
 				zap.Error(err),
+				zap.Int("close_code", closeCode),
+				zap.String("error_type", fmt.Sprintf("%T", err)),
 				zap.Bool("is_unexpected", websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure)),
+				zap.Time("last_pong", c.LastPong),
+				zap.Duration("connection_duration", time.Since(time.Now().Add(-time.Minute))),
 			)
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.Logger.Error("WebSocket read error",
+			
+			// Only log as error if it's truly unexpected
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNoStatusReceived) {
+				c.Logger.Warn("Unexpected WebSocket closure",
 					zap.String("connection_id", c.ID),
 					zap.Uint64("user_id", c.UserID),
+					zap.Uint64("auction_id", c.AuctionID),
 					zap.Error(err),
+					zap.Int("close_code", closeCode),
+				)
+			} else {
+				c.Logger.Info("WebSocket connection closed normally",
+					zap.String("connection_id", c.ID),
+					zap.Uint64("user_id", c.UserID),
+					zap.Int("close_code", closeCode),
 				)
 			}
 			break
@@ -183,7 +242,8 @@ func (c *Connection) readPump() {
 	}
 }
 
-// writePump 處理發送訊息
+// writePump handles outgoing messages to the WebSocket client
+// with message batching, heartbeat pings, and write timeout management
 func (c *Connection) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -200,21 +260,18 @@ func (c *Connection) writePump() {
 				return
 			}
 
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
-			if err != nil {
+			// 發送當前消息
+			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
-			w.Write(message)
 
-			// 批量發送排隊的訊息
+			// 批量發送排隊的訊息 - 每條消息單獨發送以確保JSON解析正確
 			n := len(c.Send)
 			for i := 0; i < n; i++ {
-				w.Write([]byte{'\n'})
-				w.Write(<-c.Send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
+				queuedMessage := <-c.Send
+				if err := c.Conn.WriteMessage(websocket.TextMessage, queuedMessage); err != nil {
+					return
+				}
 			}
 
 		case <-ticker.C:
@@ -354,6 +411,17 @@ func (c *Connection) sendHelloMessage() {
 
 // SendMessage 發送訊息給客戶端
 func (c *Connection) SendMessage(msg Message) {
+	// Check if connection is still valid
+	if c.Conn == nil || c.Send == nil {
+		c.Logger.Debug("Cannot send message: connection or channel is nil",
+			zap.String("connection_id", c.ID),
+			zap.String("message_type", msg.Type),
+			zap.Bool("conn_nil", c.Conn == nil),
+			zap.Bool("send_nil", c.Send == nil),
+		)
+		return
+	}
+
 	msg.ServerTime = time.Now()
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -364,18 +432,30 @@ func (c *Connection) SendMessage(msg Message) {
 		return
 	}
 
-	// Use a select with a default case to avoid blocking
-	// and handle the case where the channel might be closed
+	// Use a select with a default case to avoid blocking and prevent panic on closed channels
+	defer func() {
+		if r := recover(); r != nil {
+			c.Logger.Warn("Recovered from panic in SendMessage",
+				zap.String("connection_id", c.ID),
+				zap.String("message_type", msg.Type),
+				zap.Any("panic", r),
+			)
+		}
+	}()
+
 	select {
 	case c.Send <- data:
 		// Message sent successfully
-	default:
-		// Channel is full or closed, unregister the connection
-		c.Logger.Warn("Send channel full or closed, unregistering connection",
+		c.Logger.Debug("Message sent successfully",
 			zap.String("connection_id", c.ID),
+			zap.String("message_type", msg.Type),
 		)
-		// Don't close the channel here, let the hub handle it
-		c.Hub.Unregister <- c
+	default:
+		// Channel is full or closed
+		c.Logger.Debug("Send channel full or closed, skipping message",
+			zap.String("connection_id", c.ID),
+			zap.String("message_type", msg.Type),
+		)
 	}
 }
 
@@ -432,7 +512,7 @@ func (c *Connection) canBid() bool {
 		return false
 	}
 	// 沒有找到黑名單記錄 (err == gorm.ErrRecordNotFound)，用戶未被封鎖，繼續檢查其他條件
-
+	c.Logger.Debug("He is a good member :))")
 	// 檢查拍賣狀態
 	var auction models.Auction
 	if err := c.Hub.DB.First(&auction, c.AuctionID).Error; err != nil {

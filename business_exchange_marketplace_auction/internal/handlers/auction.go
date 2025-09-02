@@ -23,11 +23,17 @@ type AuctionHandler struct {
 // CreateAuctionRequest 創建拍賣請求
 type CreateAuctionRequest struct {
 	ListingID       uint64    `json:"listing_id" binding:"required"`
+	AuctionType     string    `json:"auction_type" binding:"required,oneof=sealed english dutch"`
 	AllowedMinBid   float64   `json:"allowed_min_bid" binding:"required,gte=0"`
 	AllowedMaxBid   float64   `json:"allowed_max_bid" binding:"required,gt=0"`
 	StartAt         time.Time `json:"start_at" binding:"required"`
 	EndAt           time.Time `json:"end_at" binding:"required"`
 	IsAnonymous     bool      `json:"is_anonymous"`
+	
+	// 英式拍賣專用字段
+	ReservePrice *float64 `json:"reserve_price,omitempty" binding:"omitempty,gte=0"`
+	MinIncrement *float64 `json:"min_increment,omitempty" binding:"omitempty,gt=0"`
+	BuyItNow     *float64 `json:"buy_it_now,omitempty" binding:"omitempty,gt=0"`
 }
 
 // CreateAuctionResponse 創建拍賣響應
@@ -153,16 +159,36 @@ func (h *AuctionHandler) CreateAuction(c *gin.Context) {
 		zap.Uint64("user_id", userIDValue),
 	)
 
+	// 設置拍賣類型
+	var auctionType models.AuctionType
+	switch req.AuctionType {
+	case "english":
+		auctionType = models.AuctionTypeEnglish
+	case "dutch":
+		auctionType = models.AuctionTypeDutch
+	default:
+		auctionType = models.AuctionTypeSealed
+	}
+
 	auction := &models.Auction{
 		ListingID:       req.ListingID,
 		SellerID:        userID.(uint64),
-		AuctionType:     models.AuctionTypeSealed,
+		AuctionType:     auctionType,
 		StatusCode:      string(models.AuctionStatusDraft),
 		AllowedMinBid:   req.AllowedMinBid,
 		AllowedMaxBid:   req.AllowedMaxBid,
 		StartAt:         req.StartAt,
 		EndAt:           req.EndAt,
 		IsAnonymous:     req.IsAnonymous,
+		ReservePrice:    req.ReservePrice,
+		BuyItNow:        req.BuyItNow,
+	}
+
+	// 設置英式拍賣的最小加價幅度
+	if req.MinIncrement != nil {
+		auction.MinIncrement = *req.MinIncrement
+	} else if auctionType == models.AuctionTypeEnglish {
+		auction.MinIncrement = 10000.00 // 預設最小加價
 	}
 
 	h.Logger.Debug("Saving auction to database",

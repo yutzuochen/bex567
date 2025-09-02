@@ -16,7 +16,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// Handler WebSocket 處理器
+// Handler provides HTTP-to-WebSocket upgrade handling and route management
+// for auction WebSocket connections with authentication and validation
 type Handler struct {
 	Hub    *Hub
 	Logger *zap.Logger
@@ -39,7 +40,8 @@ func (h *Handler) Start(ctx context.Context) {
 	go h.Hub.Run(ctx)
 }
 
-// HandleConnection 處理 WebSocket 連接
+// HandleConnection upgrades HTTP requests to WebSocket connections for auction rooms
+// with JWT authentication, auction validation, and connection lifecycle management
 func (h *Handler) HandleConnection(c *gin.Context) {
 	requestID := c.GetString("request_id")
 	clientIP := c.ClientIP()
@@ -178,7 +180,8 @@ func (h *Handler) HandleConnection(c *gin.Context) {
 	wsConn.Start()
 }
 
-// GetStats 取得統計資訊
+// GetStats returns current WebSocket hub statistics including connection counts,
+// auction room stats, and degradation levels via HTTP API
 func (h *Handler) GetStats(c *gin.Context) {
 	stats := h.Hub.GetStats()
 
@@ -197,7 +200,8 @@ func (h *Handler) BroadcastToUser(auctionID, userID uint64, msgType string, data
 	h.Hub.BroadcastToUser(auctionID, userID, msgType, data)
 }
 
-// isValidAuction 檢查拍賣是否有效
+// isValidAuction checks if an auction exists and is in active or extended state
+// allowing WebSocket connections only for live auctions
 func (h *Handler) isValidAuction(auctionID uint64) bool {
 	var count int64
 	h.Hub.DB.Table("auctions").
@@ -208,29 +212,52 @@ func (h *Handler) isValidAuction(auctionID uint64) bool {
 }
 
 // validateJWT 簡單JWT驗證（用於測試）
-func (h *Handler) validateJWT(tokenString string) (*middleware.JWTClaims, bool) {
+func (h *Handler) validateJWT(tokenString string) (uint64, bool) {
 	if tokenString == "" {
-		return nil, false
+		return 0, false
 	}
 
-	// Parse the token
-	token, err := jwt.ParseWithClaims(tokenString, &middleware.JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+	// Parse the token using jwt.Parse for consistency with middleware
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Validate signing method
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			log.Printf("[WS] Invalid signing method: %T", token.Method)
+			return nil, jwt.ErrSignatureInvalid
+		}
 		return []byte(h.Config.JWTSecret), nil
 	})
 
 	if err != nil {
 		log.Printf("[WS] JWT validation error: %v", err)
-		return nil, false
+		return 0, false
 	}
 
-	if claims, ok := token.Claims.(*middleware.JWTClaims); ok && token.Valid {
-		return claims, true
+	if !token.Valid {
+		log.Printf("[WS] Invalid token")
+		return 0, false
 	}
 
-	return nil, false
+	// Extract claims using jwt.MapClaims
+	if claims, ok := token.Claims.(jwt.MapClaims); ok {
+		// Validate issuer
+		if issuer, exists := claims["iss"]; !exists || issuer != h.Config.JWTIssuer {
+			log.Printf("[WS] Invalid issuer: %v, expected: %s", issuer, h.Config.JWTIssuer)
+			return 0, false
+		}
+
+		// Extract user ID
+		if uid, exists := claims["uid"]; exists {
+			if userIDFloat, ok := uid.(float64); ok {
+				return uint64(userIDFloat), true
+			}
+		}
+	}
+
+	return 0, false
 }
 
-// HandleTestConnection 測試用的簡化WebSocket處理器
+// HandleTestConnection provides a simplified WebSocket handler for testing
+// that accepts JWT tokens via query parameters instead of headers
 func (h *Handler) HandleTestConnection(c *gin.Context) {
 	log.Printf("[WS] HandleTestConnection called - Method=%s, Path=%s",
 		c.Request.Method, c.Request.URL.Path)
@@ -246,7 +273,7 @@ func (h *Handler) HandleTestConnection(c *gin.Context) {
 		return
 	}
 
-	claims, valid := h.validateJWT(token)
+	userID, valid := h.validateJWT(token)
 	if !valid {
 		log.Printf("[WS] reject: invalid token")
 		c.Writer.WriteHeader(http.StatusUnauthorized)
@@ -254,7 +281,7 @@ func (h *Handler) HandleTestConnection(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[WS] JWT valid for user %d", claims.UserID)
+	log.Printf("[WS] JWT valid for user %d", userID)
 
 	// 2) 取得拍賣ID
 	auctionIDStr := c.Param("auction_id")
@@ -283,7 +310,7 @@ func (h *Handler) HandleTestConnection(c *gin.Context) {
 	welcomeMsg := map[string]interface{}{
 		"type": "welcome",
 		"data": map[string]interface{}{
-			"user_id":    claims.UserID,
+			"user_id":    userID,
 			"auction_id": auctionID,
 			"message":    "WebSocket connection established successfully!",
 		},
@@ -316,7 +343,10 @@ func (h *Handler) HandleTestConnection(c *gin.Context) {
 	log.Printf("[WS] Connection closed")
 }
 
-// SetupRoutes 設定 WebSocket 路由
+// SetupRoutes configures all WebSocket-related routes including:
+// - /ws/auctions/:auction_id - authenticated auction connections
+// - /ws/test/:auction_id - test endpoint with query token
+// - /ws/stats - connection statistics API
 func SetupRoutes(router *gin.Engine, handler *Handler) {
 	ws := router.Group("/ws")
 	{

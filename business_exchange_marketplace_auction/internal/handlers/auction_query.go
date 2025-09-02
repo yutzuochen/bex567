@@ -23,6 +23,7 @@ type ListAuctionsResponse struct {
 type AuctionListItem struct {
 	AuctionID       uint64     `json:"auction_id"`
 	ListingID       uint64     `json:"listing_id"`
+	AuctionType     string     `json:"auction_type"`
 	StatusCode      string     `json:"status_code"`
 	StartAt         time.Time  `json:"start_at"`
 	EndAt           time.Time  `json:"end_at"`
@@ -31,6 +32,9 @@ type AuctionListItem struct {
 	IsAnonymous     bool       `json:"is_anonymous"`
 	ExtendedUntil   *time.Time `json:"extended_until,omitempty"`
 	ExtensionCount  int        `json:"extension_count"`
+	// 英式拍賣特定字段
+	CurrentPrice    *float64   `json:"current_price,omitempty"`
+	ReserveMet      bool       `json:"reserve_met"`
 	Stats           struct {
 		Participants int `json:"participants"`
 	} `json:"stats"`
@@ -115,6 +119,7 @@ func (h *AuctionHandler) ListAuctions(c *gin.Context) {
 		item := AuctionListItem{
 			AuctionID:       auction.AuctionID,
 			ListingID:       auction.ListingID,
+			AuctionType:     string(auction.AuctionType),
 			StatusCode:      auction.StatusCode,
 			StartAt:         auction.StartAt,
 			EndAt:           auction.EndAt,
@@ -123,6 +128,8 @@ func (h *AuctionHandler) ListAuctions(c *gin.Context) {
 			IsAnonymous:     auction.IsAnonymous,
 			ExtendedUntil:   auction.ExtendedUntil,
 			ExtensionCount:  auction.ExtensionCount,
+			CurrentPrice:    auction.CurrentPrice,
+			ReserveMet:      auction.ReserveMet,
 		}
 		item.Stats.Participants = int(participantCount)
 
@@ -145,6 +152,7 @@ type GetAuctionResponse struct {
 type AuctionDetail struct {
 	AuctionID       uint64     `json:"auction_id"`
 	ListingID       uint64     `json:"listing_id"`
+	AuctionType     string     `json:"auction_type"`
 	StatusCode      string     `json:"status_code"`
 	StartAt         time.Time  `json:"start_at"`
 	EndAt           time.Time  `json:"end_at"`
@@ -153,6 +161,12 @@ type AuctionDetail struct {
 	AllowedMinBid   float64    `json:"allowed_min_bid"`
 	AllowedMaxBid   float64    `json:"allowed_max_bid"`
 	IsAnonymous     bool       `json:"is_anonymous"`
+	// 英式拍賣特定字段
+	CurrentPrice    *float64   `json:"current_price,omitempty"`
+	ReserveMet      bool       `json:"reserve_met"`
+	ReservePrice    *float64   `json:"reserve_price,omitempty"`
+	MinIncrement    float64    `json:"min_increment"`
+	BuyItNow        *float64   `json:"buy_it_now,omitempty"`
 }
 
 // ViewerInfo 觀看者資訊
@@ -196,6 +210,7 @@ func (h *AuctionHandler) GetAuction(c *gin.Context) {
 	auctionDetail := AuctionDetail{
 		AuctionID:       auction.AuctionID,
 		ListingID:       auction.ListingID,
+		AuctionType:     string(auction.AuctionType),
 		StatusCode:      auction.StatusCode,
 		StartAt:         auction.StartAt,
 		EndAt:           auction.EndAt,
@@ -204,6 +219,11 @@ func (h *AuctionHandler) GetAuction(c *gin.Context) {
 		AllowedMinBid:   auction.AllowedMinBid,
 		AllowedMaxBid:   auction.AllowedMaxBid,
 		IsAnonymous:     auction.IsAnonymous,
+		CurrentPrice:    auction.CurrentPrice,
+		ReserveMet:      auction.ReserveMet,
+		ReservePrice:    auction.ReservePrice,
+		MinIncrement:    auction.MinIncrement,
+		BuyItNow:        auction.BuyItNow,
 	}
 
 	viewer := ViewerInfo{

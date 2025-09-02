@@ -32,9 +32,6 @@ COPY --from=builder /app/bin/server .
 COPY --from=builder /app/bin/migrate .
 COPY --from=builder /app/bin/finalize-job .
 
-# 複製 migration 檔案
-COPY --from=builder /app/migrations ./migrations
-
 # 設定時區
 ENV TZ=Asia/Taipei
 

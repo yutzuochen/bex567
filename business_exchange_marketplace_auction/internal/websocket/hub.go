@@ -13,7 +13,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// Hub WebSocket 連接管理中心
+// Hub WebSocket connection management center that handles all auction room connections
+// and message broadcasting with degradation control for high-load scenarios
 type Hub struct {
 	// 按拍賣 ID 分組的連接
 	AuctionRooms map[uint64]map[*Connection]bool
@@ -62,8 +63,8 @@ type HubStats struct {
 func NewHub(db *gorm.DB, redis *redis.Client, logger *zap.Logger, config *config.Config) *Hub {
 	return &Hub{
 		AuctionRooms: make(map[uint64]map[*Connection]bool),
-		Register:     make(chan *Connection, 256),
-		Unregister:   make(chan *Connection, 256),
+		Register:     make(chan *Connection, 2048),
+		Unregister:   make(chan *Connection, 2048), // YU:[TODO]128
 		Broadcast:    make(chan *BroadcastMessage, 1024),
 		DB:           db,
 		Redis:        redis,
@@ -77,7 +78,8 @@ func NewHub(db *gorm.DB, redis *redis.Client, logger *zap.Logger, config *config
 	}
 }
 
-// Run 啟動 Hub
+// Run starts the Hub main event loop that handles connection registration/unregistration,
+// message broadcasting, statistics updates, and degradation monitoring
 func (h *Hub) Run(ctx context.Context) {
 	// 啟動統計更新協程
 	go h.updateStats(ctx)
@@ -112,7 +114,8 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-// registerConnection 註冊新連接
+// registerConnection adds a new WebSocket connection to the appropriate auction room
+// with connection limit checks and dead connection cleanup
 func (h *Hub) registerConnection(conn *Connection) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
@@ -124,7 +127,7 @@ func (h *Hub) registerConnection(conn *Connection) {
 
 	// 檢查同一用戶的連接數限制
 	userConnCount := h.countUserConnections(conn.AuctionID, conn.UserID)
-	h.Logger.Debug("User connection count check",
+	h.Logger.Debug("A user connection count check",
 		zap.Uint64("user_id", conn.UserID),
 		zap.Uint64("auction_id", conn.AuctionID),
 		zap.Int("current_count", userConnCount),
@@ -179,13 +182,26 @@ func (h *Hub) unregisterConnection(conn *Connection) {
 		if _, ok := room[conn]; ok {
 			delete(room, conn)
 
-			// Safely close the channel
-			select {
-			case <-conn.Send:
-				// Channel already closed
-			default:
-				close(conn.Send)
-			}
+			// Safely close the channel with recover to prevent panic
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						h.Logger.Debug("Recovered from panic while closing channel",
+							zap.String("connection_id", conn.ID),
+							zap.Any("panic", r),
+						)
+					}
+				}()
+				
+				// Try to close the channel safely
+				select {
+				case <-conn.Send:
+					// Channel already closed or empty
+				default:
+					// Channel has data or is open, try to close it
+					close(conn.Send)
+				}
+			}()
 
 			// 如果房間空了，刪除房間
 			if len(room) == 0 {
@@ -201,7 +217,8 @@ func (h *Hub) unregisterConnection(conn *Connection) {
 	)
 }
 
-// broadcastMessage 廣播訊息
+// broadcastMessage sends a message to all connections in an auction room
+// with support for user exclusion and targeted delivery
 func (h *Hub) broadcastMessage(broadcast *BroadcastMessage) {
 	h.mutex.RLock()
 	room, ok := h.AuctionRooms[broadcast.AuctionID]
@@ -258,6 +275,8 @@ func (h *Hub) broadcastMessage(broadcast *BroadcastMessage) {
 
 // countUserConnections 計算用戶連接數
 func (h *Hub) countUserConnections(auctionID, userID uint64) int {
+
+	h.Logger.Info("countUserConnections")
 	room, ok := h.AuctionRooms[auctionID]
 	if !ok {
 		return 0
@@ -269,6 +288,7 @@ func (h *Hub) countUserConnections(auctionID, userID uint64) int {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -386,7 +406,8 @@ func (h *Hub) monitorDegradedLevel(ctx context.Context) {
 	}
 }
 
-// calculateDegradedLevel 計算降級等級
+// calculateDegradedLevel determines the system load level based on active connections
+// Returns 0-4 where 0=normal, 1=light load, 2=medium load, 3=high load, 4=extreme load
 func (h *Hub) calculateDegradedLevel() int {
 	h.mutex.RLock()
 	totalConnections := h.Stats.TotalConnections
@@ -429,7 +450,8 @@ func (h *Hub) broadcastDegradedLevelChange(level int) {
 	}
 }
 
-// listenRedisPubSub 監聽 Redis 發布訂閱
+// listenRedisPubSub handles Redis pub/sub messages for multi-instance WebSocket coordination
+// enabling distributed message broadcasting across multiple server instances
 func (h *Hub) listenRedisPubSub(ctx context.Context) {
 	pubsub := h.Redis.Subscribe(ctx, "auction_events")
 	defer pubsub.Close()
@@ -483,13 +505,26 @@ func (h *Hub) closeAllConnections() {
 
 	for _, room := range h.AuctionRooms {
 		for conn := range room {
-			// Safely close the channel
-			select {
-			case <-conn.Send:
-				// Channel already closed
-			default:
-				close(conn.Send)
-			}
+			// Safely close the channel with recover to prevent panic
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						h.Logger.Debug("Recovered from panic while closing channel",
+							zap.String("connection_id", conn.ID),
+							zap.Any("panic", r),
+						)
+					}
+				}()
+				
+				// Try to close the channel safely
+				select {
+				case <-conn.Send:
+					// Channel already closed or empty
+				default:
+					// Channel has data or is open, try to close it
+					close(conn.Send)
+				}
+			}()
 		}
 	}
 

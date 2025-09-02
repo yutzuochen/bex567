@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -16,18 +17,18 @@ const (
 	UserRoleKey = "user_role"
 )
 
-type JWTClaims struct {
-	UserID uint   `json:"uid"` // Match main backend format exactly
-	Email  string `json:"email"`
-	Role   string `json:"role,omitempty"` // Optional field
-	jwt.RegisteredClaims
-}
+// JWT claims are now handled using jwt.MapClaims for consistency with main backend
 
 func JWT(cfg *config.Config) gin.HandlerFunc {
 	// Get logger from gin context or create a no-op logger
 	logger := zap.NewNop()
 
 	logger.Debug("============= Welcome to JWT =============")
+	logger.Info("JWT middleware initialized",
+		zap.String("jwt_secret_length", fmt.Sprintf("%d", len(cfg.JWTSecret))),
+		zap.String("jwt_issuer", cfg.JWTIssuer),
+		zap.String("app_env", cfg.AppEnv),
+	)
 	return func(c *gin.Context) {
 		// Try to get logger from context
 		if ctxLogger, exists := c.Get("logger"); exists {
@@ -112,13 +113,32 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 			zap.Int("token_length", len(tokenString)),
 		)
 
-		token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			logger.Debug("JWT signing method validation",
 				zap.String("request_id", requestID),
 				zap.String("signing_method", token.Method.Alg()),
 			)
+			// Ensure the token method is HMAC256
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				logger.Error("JWT: Invalid signing method",
+					zap.String("request_id", requestID),
+					zap.String("client_ip", clientIP),
+					zap.String("method", fmt.Sprintf("%T", token.Method)),
+				)
+				return nil, jwt.ErrSignatureInvalid
+			}
+			logger.Debug("JWT: Token signing method validated",
+				zap.String("request_id", requestID),
+				zap.String("client_ip", clientIP),
+			)
 			return []byte(cfg.JWTSecret), nil
 		})
+
+		logger.Debug("JWT parsing result",
+			zap.String("request_id", requestID),
+			zap.Error(err),
+			zap.Bool("token_valid", token != nil && token.Valid),
+		)
 
 		if err != nil || !token.Valid {
 			logger.Warn("Invalid JWT token",
@@ -135,11 +155,12 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		claims, ok := token.Claims.(*JWTClaims)
+		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
 			logger.Warn("Invalid JWT claims type",
 				zap.String("request_id", requestID),
 				zap.String("client_ip", clientIP),
+				zap.Any("claims_type", fmt.Sprintf("%T", token.Claims)),
 			)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
 				"code":    "unauthorized",
@@ -149,17 +170,76 @@ func JWT(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		// Validate issuer
+		if issuer, exists := claims["iss"]; !exists || issuer != cfg.JWTIssuer {
+			logger.Warn("Invalid or missing token issuer",
+				zap.String("request_id", requestID),
+				zap.String("client_ip", clientIP),
+				zap.Any("found_issuer", issuer),
+				zap.String("expected_issuer", cfg.JWTIssuer),
+				zap.Bool("issuer_exists", exists),
+			)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+				"code":    "unauthorized",
+				"message": "Invalid token issuer",
+			}})
+			c.Abort()
+			return
+		}
+
+		// Extract user ID
+		var userID uint64
+		if uid, exists := claims["uid"]; exists {
+			if userIDFloat, ok := uid.(float64); ok {
+				userID = uint64(userIDFloat)
+			} else {
+				logger.Warn("Invalid user ID type in token",
+					zap.String("request_id", requestID),
+					zap.String("client_ip", clientIP),
+					zap.Any("user_id", uid),
+				)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+					"code":    "unauthorized",
+					"message": "Invalid token user ID",
+				}})
+				c.Abort()
+				return
+			}
+		} else {
+			logger.Warn("Missing user ID in token",
+				zap.String("request_id", requestID),
+				zap.String("client_ip", clientIP),
+			)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+				"code":    "unauthorized",
+				"message": "Missing user ID in token",
+			}})
+			c.Abort()
+			return
+		}
+
+		// Extract email and role (optional)
+		email, _ := claims["email"].(string)
+		role, _ := claims["role"].(string)
+
+		logger.Debug("JWT claims parsed successfully",
+			zap.String("request_id", requestID),
+			zap.Uint64("user_id", userID),
+			zap.String("email", email),
+			zap.String("role", role),
+			zap.String("issuer", cfg.JWTIssuer),
+		)
+
 		logger.Info("JWT authentication successful",
 			zap.String("request_id", requestID),
 			zap.String("client_ip", clientIP),
-			zap.Uint64("user_id", uint64(claims.UserID)), // Convert uint to uint64
-			zap.String("user_email", claims.Email),
-			zap.String("user_role", claims.Role),
-			zap.Time("token_expires_at", claims.ExpiresAt.Time),
+			zap.Uint64("user_id", userID),
+			zap.String("user_email", email),
+			zap.String("user_role", role),
 		)
 
-		c.Set(UserIDKey, uint64(claims.UserID)) // Store as uint64 for consistency
-		c.Set(UserRoleKey, claims.Role)
+		c.Set(UserIDKey, userID)
+		c.Set(UserRoleKey, role)
 
 		c.Next()
 	}

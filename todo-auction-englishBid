@@ -1,0 +1,405 @@
+0. URL 127.0.0.1:3000/auction_english
+
+1. 拍賣規則
+- 拍賣類型：English/Ascending（英式、加價競標），明標
+- 拍賣對象：企業主需要主動設定為拍賣模式
+- 拍賣開始與結束由企業主自行決定，但不超過61天
+- 價格機制：業主會訂一個價格區底限
+- 資格限制：所有會員，進黑名單的會員除外，黑名單判定標準為工作人員手動判斷，並且標記於該玩家中
+- 軟關閉邏輯，結束前 2 分鐘若有人出價，自動延長 1 分鐘
+- 可選擇匿名化出價者顯示
+- 拍賣物品為 mysql 表中　"listings"　中的物件
+
+2. 拍賣結束後
+- 價高的前3名會收到通知
+- 拍賣狀態更新為 "ended"
+- 系統自動發送即時通知給所有參與者
+  * 得標者：恭喜得標通知 + 後續步驟說明
+  * 賣方：得標結果通知 + 買方聯繫資訊
+  * 其他出價者：拍賣結束通知
+- 解除雙方匿名狀態
+- 提供雙方聯繫資訊（email, 電話）
+
+3. 數據庫設計:
+
+-- 建議的預設
+SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+SET sql_mode = 'STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+
+-- 1) 黑名單：由工作人員手動標記
+CREATE TABLE user_blacklist (
+  id           BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id      BIGINT NOT NULL,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  reason       VARCHAR(255) NULL,
+  noted_by     BIGINT NULL,                        -- 標記的工作人員（可 FK 到 users）
+  created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_active_blacklist (user_id, is_active),
+  INDEX idx_user_blacklist_user (user_id),
+  CONSTRAINT fk_blacklist_user     FOREIGN KEY (user_id)  REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 2) 拍賣主表（英式明標）
+CREATE TABLE auctions (
+  id                 BIGINT PRIMARY KEY AUTO_INCREMENT,
+  listing_id         BIGINT NOT NULL,                   -- 來自 listings
+  seller_id          BIGINT NOT NULL,                   -- 賣家（一般是 listing.owner_id）
+  type               ENUM('ENGLISH_OPEN') NOT NULL DEFAULT 'ENGLISH_OPEN',
+  status             ENUM('DRAFT','SCHEDULED','RUNNING','ENDED','CANCELLED')
+                         NOT NULL DEFAULT 'DRAFT',
+
+  start_time         DATETIME NOT NULL,
+  end_time           DATETIME NOT NULL,
+  -- 最長 61 天：以下為生成欄位 + 檢查約束
+  duration_secs      INT GENERATED ALWAYS AS (TIMESTAMPDIFF(SECOND, start_time, end_time)) STORED,
+  CHECK (duration_secs > 0 AND duration_secs <= 61*24*60*60),
+
+  currency           CHAR(3) NOT NULL DEFAULT 'TWD',
+  reserve_price      DECIMAL(12,2) NULL,               -- 價格區底限（保留價/底線）
+  min_increment      DECIMAL(12,2) NOT NULL DEFAULT 10.00,
+  buy_it_now         DECIMAL(12,2) NULL,               -- 如不開放直購，留 NULL
+
+  -- 反狙擊（軟關閉）參數：結束前 N 秒若有人出價 → 延長 M 秒
+  soft_close_window_secs  INT NOT NULL DEFAULT 180,     -- 預設 3 分鐘
+  soft_close_extend_secs  INT NOT NULL DEFAULT 60,      -- 預設 延長 1 分鐘
+  CHECK (soft_close_window_secs >= 0 AND soft_close_extend_secs >= 0),
+
+  -- 是否匿名顯示出價者（前端可依此隱藏 bidder id/name）
+  anonymize_bidders  BOOLEAN NOT NULL DEFAULT FALSE,
+
+  highest_bid_id     BIGINT NULL,                       -- 快取最高出價（交易內校驗）
+  version            BIGINT NOT NULL DEFAULT 0,         -- 樂觀鎖
+
+  -- 允許同一 listing 只有 1 個「有效」拍賣（SCHEDULED or RUNNING）
+  active_flag        TINYINT GENERATED ALWAYS AS (
+                        CASE WHEN status IN ('SCHEDULED','RUNNING') THEN 1 ELSE 0 END
+                      ) STORED,
+  UNIQUE KEY uniq_one_active_per_listing (listing_id, active_flag),
+
+  created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  INDEX idx_auctions_listing (listing_id),
+  INDEX idx_auctions_status_time (status, start_time, end_time),
+  INDEX idx_auctions_seller (seller_id),
+
+  CONSTRAINT fk_auctions_listing  FOREIGN KEY (listing_id) REFERENCES listings(id),
+  CONSTRAINT fk_auctions_seller   FOREIGN KEY (seller_id)  REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 3) 出價表（英式，支援代理出價上限）
+CREATE TABLE bids (
+  id                BIGINT PRIMARY KEY AUTO_INCREMENT,
+  auction_id        BIGINT NOT NULL,
+  bidder_id         BIGINT NOT NULL,
+  amount            DECIMAL(12,2) NOT NULL,            -- 這筆出價金額（可見價階）
+  max_proxy_amount  DECIMAL(12,2) NULL,                -- 代理出價上限（可為 NULL）
+  created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  -- 避免超低價/負值（最終仍以服務端邏輯檢查 min_increment）
+  CHECK (amount > 0),
+  CHECK (max_proxy_amount IS NULL OR max_proxy_amount >= amount),
+
+  INDEX idx_bids_auction_time (auction_id, created_at),
+  INDEX idx_bids_amount       (auction_id, amount DESC),
+  INDEX idx_bids_bidder       (bidder_id),
+
+  CONSTRAINT fk_bids_auction  FOREIGN KEY (auction_id) REFERENCES auctions(id) ON DELETE CASCADE,
+  CONSTRAINT fk_bids_user     FOREIGN KEY (bidder_id)  REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 4) 事件流水（審計/回放/風控）
+CREATE TABLE auction_events (
+  id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+  auction_id  BIGINT NOT NULL,
+  event_type  VARCHAR(64) NOT NULL, -- BID_PLACED, OUTBID, AUCTION_EXTENDED, AUCTION_ENDED, RESERVE_MET...
+  payload     JSON NOT NULL,        -- 事件細節（最高價、勝者、延長秒數、request_id 等）
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_events_auction_time (auction_id, created_at),
+  CONSTRAINT fk_events_auction FOREIGN KEY (auction_id) REFERENCES auctions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 5) （可選）出價冪等鍵：前端帶 Idempotency-Key，避免重試造成重複出價
+CREATE TABLE idempotency_keys (
+  id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+  scope         VARCHAR(64) NOT NULL,      -- e.g. 'bid'
+  idempotency_key  CHAR(36) NOT NULL,      -- UUID
+  user_id       BIGINT NOT NULL,
+  ref_id        BIGINT NULL,               -- 對應的 bids.id
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_scope_key (scope, idempotency_key),
+  INDEX idx_idem_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+
+<!-- A. 限制「只有 listing 的 owner 才能當該 listing 的拍賣 seller」 -->
+
+DELIMITER $$
+
+CREATE TRIGGER trg_auctions_seller_must_be_owner
+BEFORE INSERT ON auctions
+FOR EACH ROW
+BEGIN
+  DECLARE v_owner BIGINT;
+  SELECT owner_id INTO v_owner FROM listings WHERE id = NEW.listing_id FOR UPDATE;
+  IF v_owner IS NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Listing not found';
+  END IF;
+  IF NEW.seller_id <> v_owner THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'seller_id must equal listings.owner_id';
+  END IF;
+END$$
+
+CREATE TRIGGER trg_auctions_seller_must_be_owner_upd
+BEFORE UPDATE ON auctions
+FOR EACH ROW
+BEGIN
+  DECLARE v_owner BIGINT;
+  SELECT owner_id INTO v_owner FROM listings WHERE id = NEW.listing_id FOR UPDATE;
+  IF NEW.seller_id <> v_owner THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'seller_id must equal listings.owner_id';
+  END IF;
+END$$
+
+DELIMITER ;
+
+<!-- B. 出價前即時擋黑名單（資料層硬限制） -->
+DELIMITER $$
+
+CREATE TRIGGER trg_bids_block_blacklisted
+BEFORE INSERT ON bids
+FOR EACH ROW
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM user_blacklist
+    WHERE user_id = NEW.bidder_id AND is_active = TRUE
+  ) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Bidder is blacklisted';
+  END IF;
+END$$
+
+DELIMITER ;
+
+
+<!-- 英式明標 → auctions.type='ENGLISH_OPEN'，bids.amount 為可見價階；可選 bids.max_proxy_amount 做代理出價。
+
+企業主主動設定拍賣 → auctions.seller_id（由 Trigger 確保等於 listings.owner_id）。
+
+起迄自行決定但 ≤ 61 天 → duration_secs 生成欄位 + CHECK (<= 61 天).
+
+價格區底限 → reserve_price。
+
+資格限制（黑名單） → user_blacklist + trg_bids_block_blacklisted。
+
+軟關閉（反狙擊） → soft_close_window_secs / soft_close_extend_secs；實際延長由應用層在交易內更新 end_time 並寫 auction_events。
+
+匿名化出價者 → anonymize_bidders；前端顯示時根據此欄位隱藏 bidder_id/name。
+
+拍賣物品即 listings 物件 → auctions.listing_id FK。 -->
+
+4.核心約定
+
+Auth：JWT（Cookie：session）或 Authorization: Bearer <JWT>
+
+Idempotency：出價/直購/取消等必帶 Idempotency-Key: <uuid>
+
+時區：所有時間UTC+8
+
+貨幣：currency 預設 TWD
+
+RBAC：
+
+- seller（listing owner）可建立/啟動/取消拍賣
+
+- bidder（一般會員）可出價（非黑名單）
+
+-Anti-sniping：結束前 soft_close_window_secs 內有有效出價 → 同一交易內延長 soft_close_extend_secs
+
+-匿名出價：auctions.anonymize_bidders = true時，API 仍回傳 bidder_id，前端可選擇隱藏或以 hash 呈現；若要後端遮蔽，提供查詢參數 ?mask_bidders=true
+
+
+
+5.前端:
+- 使用 Next.js
+- 
+
+6.雲端佈署
+- 代碼佈署使用 Cloud Run 
+- 數據庫佈署使用 Cloud SQL
+
+
+7.WebSocket 斷線重連機制（Gateway 設計）
+
+**連線與訂閱**
+
+* URL：`wss://ws.example.com/ws?auctionId=...`；首包含身份（Cookie 同域或短期 JWT）
+* 進房成功後，**先回送快照**（最新價、剩餘時間）+ `last_sequence`，再開始流式事件
+
+**可靠傳遞（避免漏訊）**
+
+* 每則事件有單調遞增 `sequence`（來源於 `auction_events`），client 連線時帶 `resume_after=<last_sequence>`
+  → 伺服器補送缺失區間；若歷史過大，回退到快照 + 最新
+
+**健康檢測與重連**
+
+* Server：`ping/pong` 30s；無回應→終止；清理房間成員
+* Client：**指數退避 + 抖動**（0.5s → 1s → 2s … ≤ 8s）；視覺狀態提示（Connecting/Live/Offline）
+* Token 失效：使用 `401` close code（自定義 `4001`）；client 拿新 token 後重連
+* 頻率保護：房間廣播**合併（coalesce）**，如 50–100ms 內多筆價變只送最終價
+
+**降噪/節流**
+
+* 對於極熱拍賣：
+
+  * 每秒最多 X 次價格更新；其餘聚合為「快照」類訊息
+  * 使用**差分**訊息（僅價、剩餘時間、是否延長），減少 payload
+
+**關閉碼與語義**
+
+* `1000` 正常關閉、`1006` 異常關閉、`4001` 鑑權失效、`4003` 節流踢出（稍後可重連）
+
+
+8高併發降級策略（保正確、降體驗）
+
+**不妥協原則**：**出價交易正確性**與**反狙擊規則**不可降級；降級僅限非關鍵體驗層。
+
+**監控閾值（觸發降級）**
+
+* DB：主庫 p95 查詢 > 80ms、寫入死鎖率 > 1%、連線使用率 > 85%
+* WS：房間廣播積壓 > 1,000 條或平均等待 > 200ms
+* API：`/bids` p99 > 300ms 或 5xx > 1%
+* Redis/Kafka：publish 失敗率 > 0.5%
+
+**降級層級**
+
+* L1（輕微）：
+
+  * 列表 `limit` 下調（50→20），`stale-while-revalidate` 拉長（30→120s）
+  * WS 广播合併窗口加大（50ms→200ms）
+  * Analytics/Events 頻率降低，或改以快照替代
+* L2（中度）：
+
+  * 熱門拍賣頁面預設走**快取快照**，動態僅每 1–2 秒刷新一次
+  * 暫停非關鍵 API（如歷史事件大量拉取），回 `503_RETRY_LATER`
+  * 黑名單與風控改走 L2 快取（寫入後延遲一致）
+* L3（重度應對 / 讀壓激增）：
+
+  * **只讀模式** for 非關鍵寫端點（僅保留 `/bids`、`/buy-now`、`/auctions/{id}`）
+  * `/bids` 僅保留必要寫入（bid row + auction 更新 + outbox 事件），其餘延後
+  * WS 降為**每秒快照**；SSE/長輪詢作為後備
+* L4（外部依賴異常）：
+
+  * Message bus（Redis/Kafka）掛掉：**照常接單**，事件寫**Outbox**表，靠背景轉發；WS 警示「低延遲推播暫停」
+  * 讀副本落後：讀路徑短路到主庫**但限流**；或回 stale 快照
+
+**守護與恢復**
+
+* 每檔拍賣設 **金絲雀端點**（輕量健康檢查）判斷是否解除降級
+* 降級狀態以**特性旗標**（Feature Flags）控制，可熱切換
+
+---
+
+9.快取策略（多層級）
+
+**層級與角色**
+
+* **Client（SWR/ETag）**：`Cache-Control: max-age=3, stale-while-revalidate=30`；用 `ETag` 做條件式 GET
+* **CDN/Edge**：對 GET 的詳情與列表短暫快取（1–3s）+ 地區近端
+* **API Gateway/反向代理**：針對 `/auctions/{id}`、`/bids?limit=50` 設短 TTL（1–3s）
+* **Redis L2**（權威快取）：
+
+  * `auction:{id}:summary`（當前價、結束時間、reserve\_met、版本）TTL 5–10s，事件觸發即失效
+  * `auction:{id}:bids:top50` TTL 3–5s，新增出價即失效
+  * `auction:{id}:analytics:price_distribution` TTL 5–10 分鐘（由背景任務更新）
+* **應用 L1（本機記憶體）**：極熱資料（Hot auction）環迴（ring buffer）+ 每 1s 背景刷新
+
+**失效與一致性**
+
+* 以**事件**為中心（寫入成功 → 事件總線 → 失效/重建）
+* 嚴格一致性路徑（PlaceBid）：**交易提交後**才發事件 → 避免讀到未提交
+* **版本號/邏輯時鐘**：`auctions.version`；快取帶版本，舊版本拒絕覆寫
+
+**讀副本策略**
+
+* 詳情/列表預設讀**只讀副本**；出價/結束等交易必走主庫
+* 副本延遲 > X 秒時，自動短路到主庫（加限流）或回 stale + `Age` header
+
+---
+
+# (5) 競標價格分布圖（5 分鐘重算、背景任務）
+
+**目標**
+
+* 即時頁面不做重運算；由**背景任務**批次聚合
+* 提供**價格直方圖**（Histogram）與可選**時間序列**（Timeseries）兩種數據源
+
+**資料來源**
+
+* 以 `bids`（或對應的事件 `auction_events` 中 BID\_PLACED）為權威；計算欄位：`amount, created_at`
+
+**聚合模型**
+
+* **Histogram（價格分布）**
+
+  * 以 `min_increment` 作基礎桶寬（或動態：Sturges/Freedman–Diaconis，上限 80 桶）
+  * 輸出：`[{bucket_min, bucket_max, count}]` + `total_bids` + `p50/p90/p99`
+* **Timeseries（可選）**
+
+  * 每 30 秒取一次最新有效價（或每筆 BID 取樣）→ 對折線圖足夠
+
+**排程與資料流**
+
+* **排程頻率**：每 5 分鐘（cron/定時器），高流量時每 2–3 分鐘
+* **增量計算**：對每個拍賣維護 `last_processed_bid_id`（或 `last_event_sequence`）
+
+  * 本輪只掃描「新」出價，增量更新桶計數與分位數統計
+* **鎖與併發**：以 Redis `SETNX` + TTL 分布式鎖，避免多工作者重算同一拍賣
+* **輸出儲存**：
+
+  * Redis：`auction:{id}:analytics:price_distribution`（JSON；TTL 5–10 分鐘）
+  * MySQL（持久化，可選）：`auction_price_buckets`（拍賣結束時落盤）
+* **隔離寫路徑**：聚合任務僅讀**副本**；**不鎖**出價主路徑；計算過程上限時間（如 300ms/檔）
+* **API 響應**：`GET /auctions/{id}/analytics/price-distribution` 回傳聚合結果與 `updated_at`、`next_recompute_at`；支援 `ETag` 與 `If-None-Match`
+
+**失敗與補償**
+
+* 任務失敗：保留上一版結果 + 指數退避重試
+* 超時：回退為**即時計數（簡單掃描最近 N 筆）**，同時排程完整重算
+
+---
+
+10.安全性（端到端）
+
+**鑑權與存取控制**
+
+* JWT（短期）+ 續期機制；Cookie 設置 `HttpOnly`,  `SameSite=Lax`
+* RBAC：`user`（出價）、`seller`（listing owner）、`staff`（黑名單）
+* Blacklist 雙層保護：應用層檢查 + DB Trigger 擋寫
+
+**請求安全**
+
+* 冪等鍵：寫操作必帶；重放窗口 24h；儲存處理結果哈希，避免重算
+* 速率限制：每 user、每 IP、每拍賣分別限流（如 `/bids` 10 r/s/user、50 r/s/auction）
+* 請求大小限制：JSON 最大 32KB；防止大 payload 攻擊
+* CORS：僅允許信任網域；拒絕通配 `*` + cookie
+
+**傳輸與端點**
+
+* 全站 HTTPS；TLS 1.2+；HSTS 打開
+* 安全標頭：`X-Content-Type-Options, X-Frame-Options, Referrer-Policy, CSP`（API 嚴格 `default-src 'none'`）
+
+**資料與交易完整性**
+
+* DB 交易隔離：`REPEATABLE READ`；`SELECT ... FOR UPDATE` 鎖拍賣行，避免多贏家
+* 事件一致性：使用 **Outbox/Transactional Events**（寫 bids/auctions 同時寫 outbox）→ 背景轉發至 Redis/Kafka
+* 反狙擊延長在**同一交易**完成（更新 `end_time` + 記事件）避免競態
+
+
+**隱私與稽核**
+* 稽核表：`auction_events` 保存 180–365 天；支持爭議回放
+* 匿名化設定：API 支持 `mask_bidders`，前端預設不匿名
+
+
+
