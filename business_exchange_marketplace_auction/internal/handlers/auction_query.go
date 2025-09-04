@@ -23,6 +23,7 @@ type ListAuctionsResponse struct {
 type AuctionListItem struct {
 	AuctionID       uint64     `json:"auction_id"`
 	ListingID       uint64     `json:"listing_id"`
+	SellerID        uint64     `json:"seller_id"`
 	AuctionType     string     `json:"auction_type"`
 	StatusCode      string     `json:"status_code"`
 	StartAt         time.Time  `json:"start_at"`
@@ -119,6 +120,7 @@ func (h *AuctionHandler) ListAuctions(c *gin.Context) {
 		item := AuctionListItem{
 			AuctionID:       auction.AuctionID,
 			ListingID:       auction.ListingID,
+			SellerID:        auction.SellerID,
 			AuctionType:     string(auction.AuctionType),
 			StatusCode:      auction.StatusCode,
 			StartAt:         auction.StartAt,

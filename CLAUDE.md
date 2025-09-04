@@ -17,12 +17,12 @@ This is a business exchange marketplace platform (類似 BizBuySell) with a comp
 - **Features**: User auth, business listings, messaging, transactions, favorites, audit logging
 - **Authentication**: JWT tokens with Redis session management
 - **APIs**: REST (`/api/v1/`) + GraphQL (`/graphql`)
-- **Database**: `business_exchange` (17 migrations with users, listings, images, favorites, messages, transactions, leads, password resets, audit logs)
+- **Database**: `business_exchange` (18+ migrations with users, listings, images, favorites, messages, transactions, leads, password resets, audit logs, English auction support)
 - **Commands**: server, migrate, seed
 
 ### Auction Service (`business_exchange_marketplace_auction/`)
 - **Stack**: Go 1.23.0, Gin, GORM, MySQL 8, Redis, WebSocket (gorilla/websocket 1.5.3)
-- **Auction Type**: Sealed-bid (盲標) with soft-close anti-sniping mechanism
+- **Auction Types**: Sealed-bid (盲標) and English auction (英式) with soft-close anti-sniping mechanism
 - **Real-time**: WebSocket connections with Hub pattern, degradation control, heartbeat system
 - **Features**: Price range validation, blacklist management, anonymized bidders (Bidder #N), audit logging, notification system
 - **APIs**: REST (`/api/v1/`) + WebSocket (`/ws/`)
@@ -143,9 +143,12 @@ npm install           # Install dependencies
 - **Event-Driven**: Auction events trigger notifications and state changes
 
 ### Auction System Design
-- **Sealed-Bid Model**: Bidders cannot see others' bids until auction ends (1-61 day duration)
+- **Dual Auction Types**: 
+  - **Sealed-Bid Model**: Bidders cannot see others' bids until auction ends (1-61 day duration)
+  - **English Auction Model**: Real-time visible bidding with transparent competition
 - **Soft-Close Mechanism**: Auto-extends auction by 1 minute if bid placed in final 3 minutes (anti-sniping)
 - **Price Range System**: Sellers set min/max price bounds, bidders must bid within range
+- **Reserve Price Support**: English auctions support reserve prices that must be met
 - **Anonymized Display**: Bidders shown as "Bidder #N" with consistent aliases per auction
 - **Top 7 Results**: Only top 7 bidders + seller see final rankings after auction ends
 - **WebSocket Architecture**: Real-time bidding updates with hub-based connection management
@@ -166,7 +169,7 @@ npm install           # Install dependencies
 ### Database Strategy  
 - **Consolidated Database**: Both services use the `business_exchange` database
 - **Migration Management**: All migrations managed through main backend (`business_exchange_marketplace/migrations/`)
-- **Auction Integration**: Auction tables integrated via migrations 000016+ (auctions, bids, blacklist, aliases, notifications)
+- **Auction Integration**: Auction tables integrated via migrations 000016+ (auctions, bids, blacklist, aliases, notifications, English auction support in 000018+)
 - **Audit Logging**: Comprehensive tracking of user actions and system events
 - **Event Sourcing**: Auction events stored for replay and analytics
 
@@ -202,11 +205,11 @@ Database initialization handled by `/scripts/init-databases.sql` which:
 
 ### Migration Management
 - **Critical**: All migrations are managed through the main backend (`business_exchange_marketplace/migrations/`)
-- Current migration count: 000001-000017 
-- **Migration Version Sync**: If database shows version mismatch (e.g., version 20 when files only go to 017), use the force command:
+- Current migration count: 000001-000018+ 
+- **Migration Version Sync**: If database shows version mismatch, use the force command with current version:
   ```bash
   cd business_exchange_marketplace
-  go run ./cmd/migrate -action=force -version=17
+  go run ./cmd/migrate -action=force -version=18
   ```
 
 ### Service Dependencies
@@ -234,10 +237,11 @@ Database initialization handled by `/scripts/init-databases.sql` which:
 7. Run finalization: `make finalize-job` (closes expired auctions and auto-activates scheduled ones)
 
 ### Database Operations
-- **All Migrations**: Centralized in `business_exchange_marketplace/migrations/` (000001-000017)
+- **All Migrations**: Centralized in `business_exchange_marketplace/migrations/` (000001-000018+)
   - Core platform tables: users, listings, images, favorites, messages, transactions
   - Extended: user sessions, leads, password resets, audit logs
   - Auction tables: migrations 000016+ (auctions, bids, blacklist, aliases, notifications)
+  - English auction support: migration 000018+ (reserve prices, current_price tracking, visible bidding)
 - **Migration Commands**: Use main backend Makefile (`make migrate`, `make migrate-status` in `business_exchange_marketplace/`)
 - **Seed Data**: Available via `cmd/seed/main.go` in main backend
 - **Auction Service**: No separate migrations - uses shared database
@@ -263,6 +267,12 @@ Database initialization handled by `/scripts/init-databases.sql` which:
 - **Caching**: Redis for sessions, auction state, and WebSocket pub/sub coordination
 - **Monitoring**: Structured logging with Zap, health checks (`/healthz`, `/health`)
 - **WebSocket scaling**: Redis pub/sub enables multi-instance WebSocket deployment with degradation control
+
+### Cloud Deployment Scripts
+- **Frontend Deployment**: `./deploy-frontend.sh` (automated Google Cloud Run deployment)
+- **Auction Service Deployment**: `./deploy.sh` or `./quick-deploy.sh` (with secrets management)
+- **Secrets Management**: `./setup-secrets.sh` (automated Cloud Secret Manager setup)
+- **Project ID**: `businessexchange-468413` (Google Cloud project)
 
 ## API Reference
 
@@ -320,6 +330,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/auth/me
 - `closed` - Auction ended notification
 - `resume_ok` - Reconnection acknowledgment with missed events
 - `error` - Error messages and validation failures
+- `price_changed` - English auction price updates (visible bidding)
+- `reserve_met` - Reserve price reached notification
+- `outbid` - Notification when user is outbid (English auctions)
 
 ## Testing and Quality Assurance
 

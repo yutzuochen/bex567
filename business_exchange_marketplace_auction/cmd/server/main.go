@@ -13,6 +13,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -47,39 +48,45 @@ func main() {
 		zap.String("cors_origins", cfg.CORSAllowedOrigins),
 	)
 
-	// 連接資料庫
-	logger.Info("Connecting to database",
-		zap.String("host", cfg.DBHost),
-		zap.String("port", cfg.DBPort),
-		zap.String("database", cfg.DBName),
-	)
-	
-	db, err := database.Connect(cfg)
-	if err != nil {
-		logger.Fatal("Failed to connect to database", 
+	// 連接資料庫（可選，用於 Cloud Run 部署）
+	var db interface{} // Use interface{} to allow nil
+	if cfg.AppEnv != "production" || cfg.DBHost != "localhost" {
+		logger.Info("Connecting to database",
 			zap.String("host", cfg.DBHost),
 			zap.String("port", cfg.DBPort),
 			zap.String("database", cfg.DBName),
-			zap.Error(err),
 		)
+		
+		if dbConn, err := database.Connect(cfg); err != nil {
+			logger.Warn("Failed to connect to database, continuing without DB", 
+				zap.String("host", cfg.DBHost),
+				zap.String("port", cfg.DBPort),
+				zap.String("database", cfg.DBName),
+				zap.Error(err),
+			)
+		} else {
+			db = dbConn
+			logger.Info("Database connection established successfully",
+				zap.String("host", cfg.DBHost),
+				zap.String("database", cfg.DBName),
+			)
+		}
+	} else {
+		logger.Info("Skipping database connection in production with localhost")
 	}
 
-	logger.Info("Database connection established successfully",
-		zap.String("host", cfg.DBHost),
-		zap.String("database", cfg.DBName),
-	)
-
 	// 自動遷移（開發環境）- 跳過，使用手動遷移
-	if cfg.AppEnv == "development" {
+	if cfg.AppEnv == "development" && db != nil {
 		logger.Info("Skipping auto migrations - using manual migrations for better control")
 		
 		// Verify database connectivity
-		sqlDB, err := db.DB()
-		if err == nil {
-			if err := sqlDB.Ping(); err != nil {
-				logger.Warn("Database ping failed", zap.Error(err))
-			} else {
-				logger.Info("Database connectivity verified")
+		if gormDB, ok := db.(*gorm.DB); ok {
+			if sqlDB, err := gormDB.DB(); err == nil {
+				if err := sqlDB.Ping(); err != nil {
+					logger.Warn("Database ping failed", zap.Error(err))
+				} else {
+					logger.Info("Database connectivity verified")
+				}
 			}
 		}
 	}
@@ -117,7 +124,16 @@ func main() {
 
 	// 初始化路由
 	logger.Info("Initializing HTTP routes and middleware")
-	router := handlers.NewRouter(cfg, logger, db, redisClient)
+	
+	// Cast db back to *gorm.DB or nil
+	var gormDB *gorm.DB
+	if db != nil {
+		if castedDB, ok := db.(*gorm.DB); ok {
+			gormDB = castedDB
+		}
+	}
+	
+	router := handlers.NewRouter(cfg, logger, gormDB, redisClient)
 	logger.Info("HTTP routes initialized successfully")
 
 	// 啟動服務器
@@ -130,7 +146,7 @@ func main() {
 		zap.String("service", cfg.AppName),
 		zap.String("env", cfg.AppEnv),
 		zap.String("address", server.Addr),
-		zap.Bool("database_connected", db != nil),
+		zap.Bool("database_connected", gormDB != nil),
 		zap.Bool("redis_connected", redisClient != nil),
 	)
 	

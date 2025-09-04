@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Auction API</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .error { background: #ffeeee; color: red; }
+        .success { background: #eeffee; color: green; }
+    </style>
+</head>
+<body>
+    <h1>Auction API Debug Tool</h1>
+    <button onclick="testAPI()">Test Auction API</button>
+    <div id="results"></div>
+
+    <script>
+        async function testAPI() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="result">Testing...</div>';
+            
+            try {
+                console.log('Fetching auctions...');
+                const response = await fetch('http://localhost:8081/api/v1/auctions', {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include'
+                });
+                
+                console.log('Response:', response);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                console.log('Raw data:', data);
+                
+                // Transform to frontend format
+                const auctions = data.items || [];
+                const englishAuctions = auctions.filter(a => a.auction_type === 'english');
+                
+                console.log('All auctions:', auctions.length);
+                console.log('English auctions:', englishAuctions.length);
+                
+                resultsDiv.innerHTML = `
+                    <div class="result success">
+                        <h3>Success!</h3>
+                        <p>Total auctions: ${auctions.length}</p>
+                        <p>English auctions: ${englishAuctions.length}</p>
+                        <h4>English Auctions:</h4>
+                        <pre>${JSON.stringify(englishAuctions, null, 2)}</pre>
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error('API Error:', error);
+                resultsDiv.innerHTML = `
+                    <div class="result error">
+                        <h3>Error!</h3>
+                        <p>${error.message}</p>
+                        <p>Check console for details</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // Auto-run test
+        window.addEventListener('load', testAPI);
+    </script>
+</body>
+</html>

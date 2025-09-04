@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o bin/finalize-job 
 # Production stage
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata curl
 
 WORKDIR /root/
 
@@ -38,9 +38,9 @@ ENV TZ=Asia/Taipei
 # 暴露端口
 EXPOSE 8081
 
-# 健康檢查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8081/healthz || exit 1
+# 健康檢查 - Cloud Run 不需要 HEALTHCHECK 指令，但我們保留 curl 工具
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+#     CMD curl -f http://127.0.0.1:8081/healthz || exit 1
 
 # 執行服務器
 CMD ["./server"]

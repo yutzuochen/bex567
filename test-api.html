@@ -1,0 +1,9 @@
+<!DOCTYPE html><html><head><title>API Test</title></head><body><h1>Testing API</h1><div id="result"></div><script>
+fetch("http://localhost:8081/api/v1/auctions")
+.then(r => r.json())
+.then(d => {
+  const english = d.items.filter(a => a.auction_type === "english");
+  document.getElementById("result").innerHTML = `Found ${english.length} English auctions: ${JSON.stringify(english, null, 2)}`;
+})
+.catch(e => document.getElementById("result").innerHTML = `Error: ${e.message}`);
+</script></body></html>

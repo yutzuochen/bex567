@@ -54,7 +54,7 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		AppEnv:  getEnv("APP_ENV", "development"),
-		AppPort: getEnv("APP_PORT", "8081"),
+		AppPort: getEnv("PORT", getEnv("APP_PORT", "8081")), // Cloud Run uses PORT
 		AppName: getEnv("APP_NAME", "auction_service"),
 
 		JWTSecret: getEnv("JWT_SECRET", "default-jwt-secret-change-in-production"),

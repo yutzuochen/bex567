@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>測試前端 API</title>
+</head>
+<body>
+    <h1>測試前端 API 調用</h1>
+    <div id="results"></div>
+    
+    <script>
+    const baseURL = 'https://business-exchange-auction-cmgqcmf5uq-uc.a.run.app';
+    const resultsDiv = document.getElementById('results');
+    
+    async function testAPI() {
+        resultsDiv.innerHTML += '<p>開始測試認證端點...</p>';
+        
+        try {
+            // 測試認證
+            const authResponse = await fetch(`${baseURL}/api/v1/auth/me`, {
+                credentials: 'include'
+            });
+            resultsDiv.innerHTML += `<p>認證端點狀態: ${authResponse.status}</p>`;
+            
+            if (authResponse.ok) {
+                const authData = await authResponse.json();
+                resultsDiv.innerHTML += `<p>認證數據: ${JSON.stringify(authData)}</p>`;
+            }
+            
+            // 測試拍賣端點
+            resultsDiv.innerHTML += '<p>測試拍賣端點...</p>';
+            const auctionResponse = await fetch(`${baseURL}/api/v1/auctions`, {
+                credentials: 'include'
+            });
+            resultsDiv.innerHTML += `<p>拍賣端點狀態: ${auctionResponse.status}</p>`;
+            
+            if (auctionResponse.ok) {
+                const auctionData = await auctionResponse.json();
+                resultsDiv.innerHTML += `<p>拍賣數量: ${auctionData.auctions?.length || 0}</p>`;
+                resultsDiv.innerHTML += `<p>拍賣數據: ${JSON.stringify(auctionData, null, 2)}</p>`;
+            }
+            
+        } catch (error) {
+            resultsDiv.innerHTML += `<p>錯誤: ${error.message}</p>`;
+        }
+    }
+    
+    testAPI();
+    </script>
+</body>
+</html>
